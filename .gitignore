@@ -1,0 +1,14 @@
+# 依赖
+node_modules/
+
+# 上传的参考文档与旧版源码（不属于 V3.2 工程产物）
+.uploads/
+
+# 备份文件
+*.backup.js
+*.backup.html
+
+# 临时/日志
+*.log
+.DS_Store
+Thumbs.db

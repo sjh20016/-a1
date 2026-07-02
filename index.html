@@ -1,0 +1,1979 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>修行局 · V3</title>
+<style>
+:root{
+  --bg-0:#070a10; --bg-1:#0e1320; --bg-2:#161d30; --bg-3:#1d2640;
+  --gold:#c8a45c; --red:#c44536; --cyan:#4ecdc4; --purple:#7b5ea7; --green:#5ba88c; --copper:#b08d57;
+  --text:#d8dde8; --text-dim:#8892a6; --text-faint:#5a6478;
+  --border:rgba(200,164,92,.18); --border-strong:rgba(200,164,92,.4);
+  --card-bg:rgba(22,29,48,.72); --card-bg-hi:rgba(29,38,64,.85);
+  --shadow:0 6px 24px rgba(0,0,0,.45);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:radial-gradient(1200px 800px at 70% -10%, #131a2e 0%, var(--bg-1) 45%, var(--bg-0) 100%);
+  color:var(--text); font-family:"PingFang SC","Microsoft YaHei","Hiragino Sans GB","Noto Sans CJK SC",serif;
+  font-size:15px; line-height:1.8; overflow-x:hidden; -webkit-font-smoothing:antialiased;
+}
+#bg-canvas{position:fixed;inset:0;z-index:0;pointer-events:none}
+.screen{display:none!important;position:relative;z-index:2}
+.screen.active{display:flex!important}
+button{font-family:inherit;color:var(--text);cursor:pointer;border:none;background:none}
+input,textarea,select{font-family:inherit;color:var(--text)}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(200,164,92,.25);border-radius:8px}
+::-webkit-scrollbar-thumb:hover{background:rgba(200,164,92,.45)}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:9px 18px;border-radius:6px;
+  font-size:14px;letter-spacing:1px;background:linear-gradient(180deg,rgba(200,164,92,.18),rgba(200,164,92,.06));
+  border:1px solid var(--border-strong);color:var(--gold);transition:all .2s ease;white-space:nowrap}
+.btn:hover{background:linear-gradient(180deg,rgba(200,164,92,.34),rgba(200,164,92,.14));box-shadow:0 0 16px rgba(200,164,92,.25);transform:translateY(-1px)}
+.btn:active{transform:translateY(0)}
+.btn.primary{background:linear-gradient(180deg,var(--gold),#a8863f);color:#1a1208;border-color:var(--gold);font-weight:600}
+.btn.primary:hover{box-shadow:0 0 22px rgba(200,164,92,.5)}
+.btn.ghost{background:rgba(255,255,255,.03);border-color:var(--border);color:var(--text-dim)}
+.btn.ghost:hover{color:var(--text);border-color:var(--border-strong)}
+.btn:disabled{opacity:.4;cursor:not-allowed;transform:none!important;box-shadow:none!important}
+.btn.sm{padding:5px 12px;font-size:12px}
+
+/* ============================ 开界仪式屏 ============================ */
+#screen-intro{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:40px 20px;position:relative}
+.intro-title{font-size:clamp(56px,10vw,110px);font-weight:900;letter-spacing:14px;
+  background:linear-gradient(180deg,#f0d9a0 0%,var(--gold) 45%,#8a6a2c 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:0 0 60px rgba(200,164,92,.25);line-height:1;margin-bottom:8px}
+.intro-sub{font-size:clamp(14px,2.2vw,18px);color:var(--cyan);letter-spacing:4px;margin-bottom:26px}
+.intro-core{max-width:640px;font-size:14px;color:var(--text-dim);line-height:2;margin-bottom:24px;padding:0 16px}
+.intro-core b{color:var(--gold);font-weight:600}
+.seed-row{display:flex;gap:10px;align-items:center;margin-bottom:18px;flex-wrap:wrap;justify-content:center}
+.seed-row input{width:280px;background:rgba(0,0,0,.3);border:1px solid var(--border-strong);border-radius:6px;padding:10px 14px;font-size:14px;color:var(--gold);letter-spacing:2px;text-align:center}
+.seed-row input:focus{outline:none;border-color:var(--gold)}
+
+/* 七枚开界骰 · 世界命盘 */
+.dice-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;max-width:760px;margin:14px auto 22px}
+.die-slot{display:flex;flex-direction:column;align-items:center;gap:5px}
+.die-slot .dlbl{font-size:11px;color:var(--text-faint);letter-spacing:2px}
+.origin-die{width:100%;min-height:62px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(145deg,#1d2640,#0e1320);border:1px solid var(--border-strong);
+  color:var(--gold);font-size:15px;font-weight:700;text-align:center;line-height:1.3;padding:8px;
+  box-shadow:0 6px 18px rgba(0,0,0,.5),inset 0 1px 2px rgba(255,255,255,.06)}
+.origin-die.rolling{animation:diceRoll .8s ease}
+@keyframes diceRoll{0%{transform:rotateX(0) rotateY(0) scale(.6);opacity:0}60%{transform:rotateX(360deg) rotateY(180deg) scale(1.1);opacity:1}100%{transform:rotateX(720deg) rotateY(720deg) scale(1)}}
+
+/* 角色建立表单 */
+.setup-card{max-width:560px;border:1px solid var(--border-strong);border-radius:10px;background:var(--card-bg);padding:20px 24px;margin:0 auto 22px;text-align:left}
+.setup-card h3{font-size:15px;color:var(--gold);letter-spacing:2px;margin-bottom:12px}
+.form-row{margin-bottom:12px}
+.form-row label{display:block;font-size:12px;color:var(--text-dim);margin-bottom:4px;letter-spacing:1px}
+.form-row input,.form-row select,.form-row textarea{width:100%;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:14px;color:var(--text)}
+.form-row input:focus,.form-row textarea:focus,.form-row select:focus{outline:none;border-color:var(--gold)}
+.form-row .hint{font-size:11px;color:var(--text-faint);margin-top:3px}
+.form-row textarea{min-height:48px;resize:vertical}
+.intro-cta{display:flex;gap:14px;flex-wrap:wrap;justify-content:center}
+.intro-foot{position:fixed;bottom:14px;left:0;right:0;text-align:center;color:var(--text-faint);font-size:11px;letter-spacing:2px;z-index:5}
+
+/* ============================ 游戏屏 · 小说式三区 ============================ */
+#screen-game{min-height:100vh;display:flex;flex-direction:column}
+#topbar{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:10px 22px;
+  background:linear-gradient(180deg,rgba(7,10,16,.92),rgba(14,19,32,.7));border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:20;backdrop-filter:blur(8px);flex-wrap:wrap}
+.tb-left{display:flex;flex-direction:column;min-width:0}
+.tb-world{font-size:11px;color:var(--gold);letter-spacing:2px}
+.tb-scene{font-size:17px;font-weight:700;color:var(--text)}
+.tb-mid{display:flex;align-items:center;gap:14px;font-size:12px;color:var(--text-dim)}
+.tb-mid b{color:var(--cyan)}
+.tb-right{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.phase-pill{font-size:11px;padding:3px 10px;border-radius:12px;border:1px solid var(--border);color:var(--text-dim);letter-spacing:1px}
+.phase-pill.narrating{color:var(--gold);border-color:var(--gold)}
+.api-status{font-size:11px;padding:3px 9px;border-radius:12px;border:1px solid var(--border);color:var(--text-dim);cursor:help}
+.api-status.success,.api-status.ready{color:var(--cyan);border-color:rgba(78,205,196,.55)}
+.api-status.requesting,.api-status.received,.api-status.testing{color:var(--gold);border-color:var(--gold)}
+.api-status.fallback,.api-status.unavailable{color:var(--red);border-color:rgba(224,108,117,.55)}
+.api-diagnostic{padding:9px 11px;border:1px solid var(--border);border-radius:6px;background:rgba(0,0,0,.22);font-size:12px;line-height:1.55;color:var(--text-dim);white-space:pre-wrap}
+
+/* 主区：上方章节标题 → 中间小说正文 → 下方选择 */
+#novel-body{flex:1;display:flex;flex-direction:column;align-items:center;padding:24px 18px 80px;max-width:820px;margin:0 auto;width:100%}
+.chapter-title{font-size:clamp(22px,3.5vw,30px);font-weight:700;color:var(--gold);letter-spacing:3px;text-align:center;margin-bottom:6px;line-height:1.4}
+.chapter-time{font-size:12px;color:var(--cyan);letter-spacing:2px;margin-bottom:20px;text-align:center}
+.chapter-text{font-size:16px;line-height:2.1;color:var(--text);text-indent:2em;white-space:pre-wrap;letter-spacing:.5px;margin-bottom:28px;text-align:justify}
+.chapter-text p{margin-bottom:1em}
+
+/* 章末回响 */
+.chapter-echo{width:100%;margin:-12px 0 22px;padding:10px 14px;border-left:2px solid var(--border);background:rgba(0,0,0,.15);border-radius:0 5px 5px 0}
+.chapter-echo .echo-head{font-size:12px;color:var(--text-faint);letter-spacing:2px;margin-bottom:6px}
+.chapter-echo .echo-list{list-style:none;padding:0;margin:0}
+.chapter-echo .echo-list li{font-size:12px;color:var(--text-dim);line-height:1.7;padding:2px 0}
+.chapter-echo .echo-label{display:inline-block;min-width:60px;color:var(--gold);font-size:11px;letter-spacing:1px;margin-right:8px}
+.chapter-echo .echo-text{color:var(--text-dim)}
+
+/* 选择区 */
+.choice-section{width:100%;margin-top:10px}
+.choice-section h4{font-size:13px;color:var(--gold);letter-spacing:2px;margin-bottom:12px;text-align:center}
+.choice-grid{display:flex;flex-direction:column;gap:10px}
+.choice-card{background:var(--card-bg);border:1px solid var(--border);border-left:3px solid var(--cyan);border-radius:8px;padding:14px 16px;cursor:pointer;transition:all .18s;position:relative}
+.choice-card:hover{background:var(--card-bg-hi);border-left-color:var(--gold);box-shadow:0 4px 18px rgba(0,0,0,.4);transform:translateX(2px)}
+.choice-card.sel{border-left-color:var(--gold);background:rgba(200,164,92,.1);box-shadow:0 0 0 1px var(--gold)}
+.choice-label{font-size:15px;color:var(--text);font-weight:500;margin-bottom:4px}
+.choice-hint{font-size:12px;color:var(--text-dim);line-height:1.5}
+.custom-row{margin-top:14px;display:flex;flex-direction:column;gap:8px}
+.custom-row textarea{width:100%;min-height:60px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-size:14px;resize:vertical;line-height:1.6}
+.custom-row textarea:focus{outline:none;border-color:var(--border-strong)}
+.custom-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.custom-bar select{background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:5px;padding:6px 8px;font-size:12px;color:var(--text-dim)}
+.act-bar{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap;justify-content:center}
+
+/* 天机演算中 */
+.computing{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px;gap:14px}
+.computing .spinner{width:48px;height:48px;border:3px solid rgba(200,164,92,.2);border-top-color:var(--gold);border-radius:50%;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.computing .ctxt{font-size:14px;color:var(--gold);letter-spacing:3px}
+
+/* ============================ 抽屉 · 世界志 ============================ */
+.drawer-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;display:none;backdrop-filter:blur(2px)}
+.drawer-overlay.show{display:block}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,90vw);background:linear-gradient(180deg,var(--bg-2),var(--bg-1));border-left:1px solid var(--border-strong);z-index:51;transform:translateX(100%);transition:transform .3s ease;display:flex;flex-direction:column;box-shadow:-8px 0 32px rgba(0,0,0,.5)}
+.drawer.show{transform:translateX(0)}
+.drawer-head{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--border)}
+.drawer-head h3{font-size:15px;color:var(--gold);letter-spacing:2px}
+.drawer-close{font-size:22px;color:var(--text-dim);cursor:pointer;background:none;border:none;line-height:1}
+.drawer-close:hover{color:var(--text)}
+.drawer-tabs{display:flex;gap:2px;padding:8px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.drawer-tab{font-size:12px;padding:6px 12px;border-radius:5px;cursor:pointer;color:var(--text-dim);border:1px solid transparent}
+.drawer-tab:hover{color:var(--text)}
+.drawer-tab.active{color:var(--gold);border-color:var(--border-strong);background:rgba(200,164,92,.08)}
+.drawer-body{flex:1;overflow-y:auto;padding:14px 18px}
+.drawer-body h4{font-size:13px;color:var(--gold);letter-spacing:1px;margin:14px 0 8px;border-bottom:1px solid var(--border);padding-bottom:4px}
+.drawer-body h4:first-child{margin-top:0}
+.arch-cast{display:flex;flex-direction:column;gap:10px;margin-bottom:10px}
+.cast-card{background:rgba(0,0,0,.2);border-left:2px solid var(--purple);border-radius:0 5px 5px 0;padding:8px 11px}
+.cast-card .cn{font-size:14px;font-weight:700;color:var(--gold)}
+.cast-card .ci{font-size:11px;color:var(--text-dim);margin-top:2px}
+.cast-card .cw{font-size:11px;color:var(--cyan);margin-top:3px;font-style:italic}
+.cast-card .cr{font-size:10px;color:var(--text-faint);margin-top:3px}
+.arch-list{list-style:none;padding:0}
+.arch-list li{font-size:12px;color:var(--text);line-height:1.7;padding:4px 0;border-bottom:1px dashed var(--border)}
+.arch-list li:last-child{border-bottom:none}
+.arch-empty{font-size:12px;color:var(--text-faint);padding:8px 0;text-align:center}
+.omni-box{background:rgba(123,94,167,.1);border:1px dashed var(--purple);border-radius:6px;padding:8px 11px;margin-bottom:8px;font-size:12px;line-height:1.6}
+.omni-box .ot{color:var(--purple);font-weight:700;margin-bottom:4px}
+.replay-timeline{display:flex;flex-direction:column;gap:12px}
+.replay-round{background:rgba(0,0,0,.2);border-left:2px solid var(--cyan);border-radius:0 5px 5px 0;padding:9px 12px}
+.replay-round .rr-head{font-size:13px;color:var(--gold);font-weight:700;margin-bottom:4px}
+.replay-round .rr-actions{font-size:11px;color:var(--cyan);margin-bottom:6px}
+.replay-round .rr-text{font-size:12px;color:var(--text);line-height:1.7;white-space:pre-wrap}
+
+/* ============================ 设置弹窗 ============================ */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:60;display:none;align-items:center;justify-content:center;backdrop-filter:blur(3px)}
+.modal-overlay.show{display:flex}
+.modal{width:min(480px,92vw);max-height:88vh;overflow-y:auto;background:linear-gradient(180deg,var(--bg-2),var(--bg-1));border:1px solid var(--border-strong);border-radius:10px;padding:20px 22px;box-shadow:var(--shadow)}
+.modal h3{font-size:16px;color:var(--gold);letter-spacing:2px;margin-bottom:14px;text-align:center}
+.modal-body .form-row{margin-bottom:12px}
+.modal-foot{display:flex;gap:10px;justify-content:flex-end;margin-top:14px}
+.hint{font-size:11px;color:var(--text-faint);margin-top:3px;line-height:1.5}
+.hint.warn{color:var(--red)}
+
+/* Toast */
+.toast{position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:var(--bg-3);border:1px solid var(--border-strong);color:var(--text);padding:10px 20px;border-radius:6px;font-size:13px;z-index:80;opacity:0;transition:opacity .3s;pointer-events:none;box-shadow:var(--shadow)}
+.toast.show{opacity:1}
+
+/* 遗产展示 */
+.legacy-box{background:rgba(200,164,92,.06);border:1px solid var(--border-strong);border-radius:8px;padding:14px 16px;margin-top:14px}
+.legacy-box h4{color:var(--gold);font-size:14px;margin-bottom:8px}
+.legacy-box pre{font-size:11px;color:var(--text-dim);white-space:pre-wrap;line-height:1.6;max-height:300px;overflow-y:auto;background:rgba(0,0,0,.3);padding:8px;border-radius:4px}
+
+/* ============================ 房间大厅 ============================ */
+#screen-lobby{min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:30px 18px 40px}
+.lobby-title{font-size:clamp(28px,5vw,42px);font-weight:800;color:var(--gold);letter-spacing:6px;margin-bottom:6px}
+.lobby-sub{font-size:13px;color:var(--text-dim);letter-spacing:2px;margin-bottom:22px}
+.lobby-meta{display:flex;gap:14px;align-items:center;flex-wrap:wrap;justify-content:center;margin-bottom:20px;font-size:13px;color:var(--text-dim)}
+.lobby-meta b{color:var(--gold)}
+.lobby-meta .lm-seed{background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:5px;padding:4px 10px;color:var(--cyan);letter-spacing:1px}
+.seat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;max-width:860px;width:100%;margin-bottom:22px}
+.seat-card{background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:16px 14px;display:flex;flex-direction:column;gap:8px;min-height:200px;position:relative;transition:all .2s}
+.seat-card.host{border-color:var(--gold);box-shadow:0 0 12px rgba(200,164,92,.15)}
+.seat-card.empty{border-style:dashed;opacity:.7}
+.seat-card.bot{border-color:var(--purple)}
+.seat-card.ready{border-color:var(--green)}
+.seat-head{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.seat-num{font-size:13px;color:var(--text-dim);letter-spacing:1px}
+.seat-host-badge{font-size:10px;color:var(--gold);border:1px solid var(--border-strong);border-radius:3px;padding:1px 6px;letter-spacing:1px}
+.seat-kind{font-size:11px;padding:2px 8px;border-radius:10px;letter-spacing:1px}
+.seat-kind.human{color:var(--cyan);border:1px solid rgba(78,205,196,.3)}
+.seat-kind.bot{color:var(--purple);border:1px solid rgba(123,94,167,.3)}
+.seat-kind.empty{color:var(--text-faint);border:1px solid var(--border)}
+.seat-body{flex:1;display:flex;flex-direction:column;gap:4px}
+.seat-name{font-size:16px;font-weight:700;color:var(--text)}
+.seat-actor{font-size:13px;color:var(--gold)}
+.seat-actor .sa-dao{font-size:11px;color:var(--text-dim)}
+.seat-status{font-size:12px;color:var(--text-faint)}
+.seat-status.ready{color:var(--green)}
+.seat-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:auto}
+.seat-actions .btn{flex:1;min-width:70px}
+.seat-empty-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-faint);font-size:13px}
+.lobby-actions{display:flex;gap:14px;flex-wrap:wrap;justify-content:center}
+.lobby-loading{position:fixed;inset:0;background:rgba(7,10,16,.88);z-index:70;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;backdrop-filter:blur(4px)}
+.lobby-loading .spinner{width:48px;height:48px;border:3px solid rgba(200,164,92,.2);border-top-color:var(--gold);border-radius:50%;animation:spin 1s linear infinite}
+.lobby-loading .ll-text{font-size:14px;color:var(--gold);letter-spacing:3px}
+
+/* 机器人添加弹窗 */
+.bot-profile-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.bot-profile-opt{background:rgba(0,0,0,.25);border:1px solid var(--border);border-radius:6px;padding:10px;cursor:pointer;transition:all .15s}
+.bot-profile-opt:hover{border-color:var(--border-strong)}
+.bot-profile-opt.sel{border-color:var(--purple);background:rgba(123,94,167,.12)}
+.bot-profile-opt .bp-label{font-size:14px;font-weight:600;color:var(--purple)}
+.bot-profile-opt .bp-desc{font-size:11px;color:var(--text-dim);margin-top:2px}
+.bot-actor-select{width:100%;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:14px;color:var(--text);margin-bottom:12px}
+
+/* 回合等待面板 */
+.turn-waiting{display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:30px;text-align:center}
+.turn-waiting.show{display:flex}
+.turn-waiting .tw-icon{font-size:28px;color:var(--gold)}
+.turn-waiting .tw-text{font-size:15px;color:var(--text);letter-spacing:1px;line-height:1.8}
+.turn-waiting .tw-text b{color:var(--gold)}
+.turn-waiting .tw-sub{font-size:12px;color:var(--text-dim)}
+.seat-progress{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:6px}
+.sp-chip{font-size:11px;padding:3px 10px;border-radius:10px;border:1px solid var(--border);color:var(--text-dim)}
+.sp-chip.done{color:var(--green);border-color:rgba(91,168,140,.4)}
+.sp-chip.thinking{color:var(--purple);border-color:rgba(123,94,167,.4)}
+
+/* 热座交接遮罩 */
+.hotseat-mask{position:fixed;inset:0;background:rgba(7,10,16,.96);z-index:70;display:none;flex-direction:column;align-items:center;justify-content:center;gap:20px;text-align:center;padding:30px}
+.hotseat-mask.show{display:flex}
+.hm-text{font-size:18px;color:var(--gold);letter-spacing:2px;line-height:1.8}
+.hm-actor{font-size:28px;font-weight:800;color:var(--cyan);letter-spacing:4px}
+.hm-hint{font-size:13px;color:var(--text-dim);letter-spacing:1px}
+
+@media(max-width:760px){
+  #topbar{padding:8px 12px}
+  .tb-mid{display:none}
+  #novel-body{padding:16px 12px 70px}
+  .chapter-text{font-size:15px;line-height:2}
+  .drawer{width:100vw}
+}
+</style>
+</head>
+<body>
+<canvas id="bg-canvas"></canvas>
+
+<!-- ============== 开界仪式屏 ============== -->
+<div class="screen active" id="screen-intro">
+  <div class="intro-title">修行局</div>
+  <div class="intro-sub">V3 · 小说式回合叙事</div>
+  <div class="intro-core">
+    一名玩家与三名 AI 修士，共同进入由<b>七枚开界骰</b>生成的修仙世界。<br>
+    每一回合读一段小说，做一次选择，看见世界如何回应。<br>
+    角色会隐瞒、分离、重逢、飞升、陨落、转世。
+  </div>
+
+  <div class="seed-row">
+    <input id="seed-input" type="text" placeholder="世界种子（留空随机）">
+    <button class="btn ghost sm" id="btn-random-seed">随机</button>
+    <button class="btn primary" id="btn-roll">掷骰开界</button>
+    <button class="btn ghost sm" id="btn-continue" style="display:none">继续上一局</button>
+  </div>
+
+  <div class="dice-grid" id="origin-dice"></div>
+
+  <div class="setup-card" id="setup-card" style="display:none">
+    <h3>立命 · 你的角色</h3>
+    <div class="form-row">
+      <label>名字</label>
+      <input id="su-name" type="text" value="陆知微">
+    </div>
+    <div class="form-row">
+      <label>身份</label>
+      <input id="su-identity" type="text" value="青霄宗外门弟子">
+    </div>
+    <div class="form-row">
+      <label>道途</label>
+      <select id="su-dao">
+        <option value="剑修">剑修</option>
+        <option value="丹道">丹道</option>
+        <option value="阵法">阵法</option>
+        <option value="游侠">游侠</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>公开愿望</label>
+      <input id="su-wish" type="text" value="夺得传承，证明自己不是庸才">
+    </div>
+    <div class="form-row">
+      <label>隐藏命数（仅你与天机知晓）</label>
+      <textarea id="su-fate">残剑中的剑灵似乎认识我</textarea>
+      <div class="hint">此命数会影响叙事与选项，但其他角色未必知晓。</div>
+    </div>
+    <div class="form-row">
+      <label>房间模式</label>
+      <select id="su-mode">
+        <option value="local-solo">单人（1 真人 + 机器人）</option>
+        <option value="local-hotseat">热座（同设备多人轮流）</option>
+      </select>
+      <div class="hint">单人：你与 3 个机器人；热座：同设备 2~4 名真人轮流操作，可加机器人补位。</div>
+    </div>
+  </div>
+
+  <div class="intro-cta" id="intro-cta" style="display:none">
+    <button class="btn primary" id="btn-create-room">创建房间 · 入局</button>
+    <button class="btn ghost" id="btn-reroll">重掷命盘</button>
+    <button class="btn ghost sm" id="btn-quick-solo" style="display:none">快速单人（V3）</button>
+  </div>
+
+  <div class="intro-foot">断网或无 API 时自动回退本地叙事 · 游戏始终可玩</div>
+</div>
+
+<!-- ============== 房间大厅 ============== -->
+<div class="screen" id="screen-lobby">
+  <div class="lobby-title">修行局</div>
+  <div class="lobby-sub">V3.1 · 房间大厅</div>
+  <div class="lobby-meta">
+    <span>种子 <b class="lm-seed" id="lobby-seed">—</b></span>
+    <span>模式 <b id="lobby-mode">单人</b></span>
+    <button class="btn ghost sm" id="btn-lobby-settings">房主设置</button>
+    <button class="btn ghost sm" id="btn-lobby-back">返回</button>
+  </div>
+  <div class="seat-grid" id="seat-grid"></div>
+  <div class="lobby-actions">
+    <button class="btn primary" id="btn-lobby-start" disabled>开局</button>
+  </div>
+  <div class="hint" id="lobby-start-hint"></div>
+  <div class="lobby-loading" id="lobby-loading" style="display:none">
+    <div class="spinner"></div>
+    <div class="ll-text" id="ll-text">正在生成开局……</div>
+  </div>
+</div>
+
+<!-- ============== 添加机器人弹窗 ============== -->
+<div class="modal-overlay" id="bot-modal">
+  <div class="modal">
+    <h3>添加机器人</h3>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>机器人策略</label>
+        <div class="bot-profile-grid" id="bot-profile-grid"></div>
+      </div>
+      <div class="form-row">
+        <label>控制角色</label>
+        <select class="bot-actor-select" id="bot-actor-select"></select>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="bot-cancel">取消</button>
+      <button class="btn primary" id="bot-confirm">添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============== 立命弹窗 ============== -->
+<div class="modal-overlay" id="actor-modal">
+  <div class="modal">
+    <h3>立命 · 角色建立</h3>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>名字</label>
+        <input id="ac-name" type="text" value="陆知微">
+      </div>
+      <div class="form-row">
+        <label>身份</label>
+        <input id="ac-identity" type="text" value="青霄宗外门弟子">
+      </div>
+      <div class="form-row">
+        <label>道途</label>
+        <select id="ac-dao">
+          <option value="剑修">剑修</option>
+          <option value="丹道">丹道</option>
+          <option value="阵法">阵法</option>
+          <option value="游侠">游侠</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>公开愿望</label>
+        <input id="ac-wish" type="text" value="夺得传承，证明自己不是庸才">
+      </div>
+      <div class="form-row">
+        <label>隐藏命数（仅你与天机知晓）</label>
+        <textarea id="ac-fate">残剑中的剑灵似乎认识我</textarea>
+        <div class="hint">此命数会影响叙事与选项，但其他角色未必知晓。</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="ac-cancel">取消</button>
+      <button class="btn primary" id="ac-confirm">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============== 热座交接遮罩 ============== -->
+<div class="hotseat-mask" id="hotseat-mask">
+  <div class="hm-text">请将设备交给</div>
+  <div class="hm-actor" id="hm-actor">—</div>
+  <div class="hm-text">该修士的控制者</div>
+  <div class="hm-hint" id="hm-hint">点击下方进入私密选择</div>
+  <button class="btn primary" id="hm-enter">进入私密选择</button>
+</div>
+
+<!-- ============== 游戏屏 · 小说式 ============== -->
+<div class="screen" id="screen-game">
+  <div id="topbar">
+    <div class="tb-left">
+      <div class="tb-world" id="tb-world">—</div>
+      <div class="tb-scene" id="tb-scene">—</div>
+    </div>
+    <div class="tb-mid">
+      <span>第 <b id="tb-chapter">0</b> 章</span>
+      <span>·</span>
+      <span><b id="tb-year">1</b> 年</span>
+    </div>
+    <div class="tb-right">
+      <span class="phase-pill" id="phase-pill">—</span>
+      <span class="api-status" id="ai-status" title="点击设置可查看诊断">AI：本地</span>
+      <button class="btn ghost sm" id="btn-archive">世界志</button>
+      <button class="btn ghost sm" id="btn-save">存档</button>
+      <button class="btn ghost sm" id="btn-regen">重写本章</button>
+      <button class="btn ghost sm" id="btn-settings">设置</button>
+    </div>
+  </div>
+
+  <div id="novel-body">
+    <div class="chapter-title" id="chapter-title">—</div>
+    <div class="chapter-time" id="chapter-time">—</div>
+    <div class="chapter-text" id="chapter-text">—</div>
+
+    <div class="chapter-echo" id="chapter-echo" style="display:none"></div>
+
+    <div class="choice-section" id="choice-section">
+      <h4>你的选择</h4>
+      <div class="choice-grid" id="choice-grid"></div>
+      <div class="custom-row">
+        <textarea id="custom-text" placeholder="或自定义行动：例如「以残剑为媒，在雨夜召来游离的剑意。」"></textarea>
+        <div class="custom-bar">
+          <button class="btn sm" id="btn-custom">提交自定义</button>
+        </div>
+      </div>
+      <div class="act-bar">
+        <button class="btn primary" id="btn-confirm" disabled>天机演算 · 推进下一章</button>
+      </div>
+    </div>
+
+    <div class="computing" id="computing" style="display:none">
+      <div class="spinner"></div>
+      <div class="ctxt">天机演算中……</div>
+    </div>
+
+    <div class="turn-waiting" id="turn-waiting">
+      <div class="tw-icon">·</div>
+      <div class="tw-text" id="tw-text">已落子</div>
+      <div class="tw-sub" id="tw-sub">等待其他修士……</div>
+      <div class="seat-progress" id="seat-progress"></div>
+      <button class="btn ghost sm" id="btn-cancel-action" style="display:none">撤回并重新选择</button>
+    </div>
+
+    <div class="legacy-box" id="legacy-box" style="display:none">
+      <h4>百年遗产 · 下一卷开局钩子</h4>
+      <pre id="legacy-pre"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- ============== 世界志抽屉 ============== -->
+<div class="drawer-overlay" id="drawer-overlay"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-head">
+    <h3>世界志</h3>
+    <button class="drawer-close" id="drawer-close">×</button>
+  </div>
+  <div class="drawer-tabs">
+    <div class="drawer-tab active" data-tab="cast">本章人物</div>
+    <div class="drawer-tab" data-tab="rumors">世界传闻</div>
+    <div class="drawer-tab" data-tab="chronicle">修真编年史</div>
+    <div class="drawer-tab" data-tab="karma">未结因果</div>
+    <div class="drawer-tab" data-tab="replay">回放</div>
+    <div class="drawer-tab" data-tab="omni">天机全览</div>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</div>
+
+<!-- ============== 设置弹窗 ============== -->
+<div class="modal-overlay" id="set-modal">
+  <div class="modal">
+    <h3>设置 · AI 与叙事</h3>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>启用 AI 叙事（断网自动回退本地）</label>
+        <select id="set-ai-on"><option value="0">关闭（纯离线）</option><option value="1">开启</option></select>
+        <div class="hint">开启后每回合调用一次叙事 API；失败/超时回退本地模板，游戏照常进行。</div>
+      </div>
+      <div class="form-row">
+        <label>OpenAI 兼容接口 Base URL</label>
+        <input id="set-base" type="text" placeholder="https://api.openai.com/v1">
+        <div class="hint">直接浏览器调用需服务端支持 CORS，否则用本地代理。</div>
+      </div>
+      <div class="form-row">
+        <label>API Key（仅存内存，刷新即失，不入存档/localStorage）</label>
+        <input id="set-key" type="password" placeholder="sk-...">
+        <div class="hint warn">V3 安全策略：Key 不持久化，不进入世界存档。</div>
+      </div>
+      <div class="form-row">
+        <label>模型</label>
+        <input id="set-model" type="text" value="gpt-4o-mini">
+      </div>
+      <div class="form-row">
+        <label>温度（0~1）</label>
+        <input id="set-temp" type="number" min="0" max="1" step="0.1" value="0.8">
+      </div>
+      <div class="form-row">
+        <label>叙事节奏</label>
+        <select id="set-pace">
+          <option value="近景">近景（尽量数日）</option>
+          <option value="常规" selected>常规（由故事决定）</option>
+          <option value="史诗">史诗（允许跨年/百年）</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>API 诊断</label>
+        <div class="api-diagnostic" id="set-ai-status">尚未检测。</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="set-cancel">取消</button>
+      <button class="btn ghost" id="set-test">测试连接</button>
+      <button class="btn primary" id="set-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="game-core.js?v=3.1.6"></script>
+<script src="story-core.js?v=3.1.6"></script>
+<script src="room-core.js?v=3.1.6"></script>
+<script>
+/* ============================================================
+ * V3 UI 控制层
+ * ============================================================ */
+const UI = {
+  settings: { aiOn:0, base:'', model:'gpt-4o-mini', temperature:0.8, narrativePace:'常规', mode:'novel' },
+  selectedChoiceId: null,
+  generationRequestId: 0,
+  isGenerating: false,
+  currentRoll: null,
+  drawerTab: 'cast',
+  room: null,               // V3.1 RoomState（null = V3 单人模式）
+  viewerSeatId: null,       // 当前观察席位
+  _botModalSeat: null,
+  _actorModalSeat: null,
+  _selectedBotProfile: 'pursuer',
+  _botAvailable: [],
+  _lastRoomRound: 0,
+  _roomPolling: false,
+};
+
+UI.esc = function (s) { return String(s==null?'':s).replace(/[&<>"']/g, function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); };
+
+UI.toast = function (msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(UI._toastT);
+  UI._toastT = setTimeout(function () { t.classList.remove('show'); }, 2200);
+};
+
+/* ---------- 开界仪式 ---------- */
+UI.renderOriginDice = function (roll) {
+  const grid = document.getElementById('origin-dice');
+  const labels = { era:'时代', terrain:'山河', order:'秩序', heavenlyLaw:'天道', greatTribulation:'大劫', aberrant:'异类', storyGravity:'故事引力' };
+  grid.innerHTML = Object.keys(labels).map(function (k) {
+    return '<div class="die-slot"><div class="dlbl">' + labels[k] + '</div><div class="origin-die rolling">' + UI.esc(roll[k] || '—') + '</div></div>';
+  }).join('');
+};
+
+UI.doRoll = function (seed) {
+  seed = seed || document.getElementById('seed-input').value.trim() || ('V3-' + Math.floor(Math.random() * 99999));
+  document.getElementById('seed-input').value = seed;
+  UI.currentRoll = Story.rollOrigin(seed);
+  UI.renderOriginDice(UI.currentRoll);
+  document.getElementById('setup-card').style.display = '';
+  document.getElementById('intro-cta').style.display = '';
+};
+
+UI.startGame = async function () {
+  // The legacy quick-solo path must not inherit a room left by a previous
+  // lobby visit; renderChapter dispatches by this flag.
+  UI.room = null;
+  UI.viewerSeatId = null;
+  UI._roomPolling = false;
+  const seed = document.getElementById('seed-input').value.trim() || ('V3-' + Math.floor(Math.random() * 99999));
+  const setup = {
+    name: document.getElementById('su-name').value.trim() || '陆知微',
+    identity: document.getElementById('su-identity').value.trim() || '外门弟子',
+    daoPath: document.getElementById('su-dao').value,
+    publicWish: document.getElementById('su-wish').value.trim(),
+    hiddenFate: document.getElementById('su-fate').value.trim(),
+    personalityTags: Story.PERSONALITY_TAGS[document.getElementById('su-dao').value] ? Story.PERSONALITY_TAGS[document.getElementById('su-dao').value].slice(0, 2) : ['探索'],
+    controller: 'human',
+  };
+  UI.showComputing(true);
+  try {
+    await Story.startGame(seed, setup);
+    UI.switchScreen('game');
+    UI.renderChapter();
+  } catch (e) {
+    UI.toast('开局失败：' + e.message);
+  } finally {
+    UI.showComputing(false);
+  }
+};
+
+/* ---------- 章节渲染 ---------- */
+UI.renderChapter = function () {
+  if (UI.room) return UI.renderRoomChapter();
+  const meta = Story.getMeta();
+  const ch = Story.getCurrentChapter();
+  document.getElementById('tb-world').textContent = meta.worldName;
+  document.getElementById('tb-scene').textContent = ch ? ch.title : '—';
+  document.getElementById('tb-chapter').textContent = meta.chapterIndex;
+  document.getElementById('tb-year').textContent = Math.floor(meta.year);
+  document.getElementById('phase-pill').textContent = '阅读';
+  document.getElementById('phase-pill').className = 'phase-pill';
+
+  document.getElementById('chapter-title').textContent = ch ? ch.title : '—';
+  const timeTxt = ch && ch.timePassed ? (ch.timePassed.value + ' ' + ch.timePassed.unit + '后') : (meta.chapterIndex === 1 ? '开局' : '数日后');
+  document.getElementById('chapter-time').textContent = meta.worldName + ' · ' + Math.floor(meta.year) + '年 · ' + timeTxt;
+  // 正文按段落渲染
+  const text = ch ? ch.chapter : '';
+  const html = text.split(/\n+/).filter(Boolean).map(function (p) { return '<p>' + UI.esc(p) + '</p>'; }).join('');
+  document.getElementById('chapter-text').innerHTML = html;
+
+  UI.renderChapterEcho();
+  UI.renderChoices();
+  UI.renderLegacy();
+};
+
+UI.renderChapterEcho = function () {
+  var box = document.getElementById('chapter-echo');
+  if (!box) return;
+  var state = Story.state;
+  if (!state || !state.ledger || !Array.isArray(state.ledger.turnRecords) || !state.ledger.turnRecords.length) {
+    box.style.display = 'none'; box.innerHTML = ''; return;
+  }
+  var record = state.ledger.turnRecords[state.ledger.turnRecords.length - 1];
+  var envelope = record && record.resolutionEnvelope;
+  if (!envelope) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  var action = (envelope.actions && envelope.actions[0]) || null;
+  var items = [];
+  if (action && Array.isArray(action.gains) && action.gains.length) {
+    var gs = action.gains.map(function (g) { return g && g.text; }).filter(Boolean);
+    if (gs.length) items.push({ label: '获得', text: gs.join('；') });
+  }
+  if (action && Array.isArray(action.costs) && action.costs.length) {
+    var cs = action.costs.map(function (c) { return c && c.text; }).filter(Boolean);
+    if (cs.length) items.push({ label: '代价', text: cs.join('；') });
+  }
+  var rels = (action && Array.isArray(action.relationEffects) && action.relationEffects.length)
+    ? action.relationEffects
+    : (envelope.publicDelta || []).filter(function (d) { return d.op === 'UPDATE_RELATION'; });
+  if (rels.length) {
+    var rt = rels.map(function (r) {
+      var axis = r.axis || (r.payload && r.payload.axis) || '关系';
+      var d = (r.delta != null) ? r.delta : (r.payload && r.payload.delta);
+      return axis + (d > 0 ? ' +' : ' ') + d;
+    }).join('，');
+    items.push({ label: '关系变化', text: rt });
+  }
+  var wops = (envelope.publicDelta || []).filter(function (d) {
+    return d.op === 'ADD_PUBLIC_FACT' || d.op === 'ADD_PUBLIC_RUMOR' || d.op === 'ADD_EVENT' || d.op === 'ADVANCE_TIME' || d.op === 'SET_SCENE';
+  });
+  if (wops.length) {
+    var wt = wops.slice(0, 2).map(function (d) {
+      if (d.op === 'ADVANCE_TIME' && d.payload) return '时间推进 ' + (d.payload.value || '') + (d.payload.unit || '');
+      if (d.op === 'SET_SCENE') return '场景变换';
+      var t = d.payload && d.payload.text;
+      return t ? String(t).slice(0, 20) : d.op;
+    }).join('；');
+    items.push({ label: '世界变化', text: wt });
+  }
+  var threads = (action && Array.isArray(action.threadEffects) && action.threadEffects.length)
+    ? action.threadEffects
+    : (envelope.publicDelta || []).filter(function (d) { return d.op === 'ADD_THREAD' || d.op === 'UPDATE_THREAD'; });
+  if (threads.length) {
+    items.push({ label: '未结因果', text: threads.length + ' 条因果线推进' });
+  }
+  if (!items.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  items = items.slice(0, 4);
+  var html = '<div class="echo-head">章末回响</div><ul class="echo-list">';
+  items.forEach(function (it) {
+    html += '<li><span class="echo-label">' + UI.esc(it.label) + '</span><span class="echo-text">' + UI.esc(it.text) + '</span></li>';
+  });
+  html += '</ul>';
+  box.innerHTML = html;
+  box.style.display = '';
+};
+
+UI.renderChoices = function () {
+  if (UI.room) return UI.renderRoomChoices();
+  const choices = Story.getPlayerChoices();
+  const grid = document.getElementById('choice-grid');
+  grid.innerHTML = choices.map(function (c, i) {
+    const letter = ['A', 'B', 'C', 'D'][i] || (i + 1);
+    return '<div class="choice-card' + (UI.selectedChoiceId === c.id ? ' sel' : '') + '" data-cid="' + UI.esc(c.id) + '">' +
+      '<div class="choice-label">' + letter + '. ' + UI.esc(c.label) + '</div>' +
+      (c.hint ? '<div class="choice-hint">' + UI.esc(c.hint) + '</div>' : '') +
+      '</div>';
+  }).join('');
+  grid.querySelectorAll('.choice-card').forEach(function (el) {
+    el.addEventListener('click', function () {
+      UI.selectedChoiceId = el.getAttribute('data-cid');
+      UI.renderChoices();
+      document.getElementById('btn-confirm').disabled = false;
+    });
+  });
+  if (!choices.length) document.getElementById('choice-section').style.display = 'none';
+  else document.getElementById('choice-section').style.display = '';
+};
+
+UI.renderLegacy = function () {
+  const box = document.getElementById('legacy-box');
+  if (Story.state && Story.state.finalLegacy) {
+    box.style.display = '';
+    document.getElementById('legacy-pre').textContent = Story.exportLegacy();
+  } else {
+    box.style.display = 'none';
+  }
+};
+
+UI.showComputing = function (on) {
+  document.getElementById('computing').style.display = on ? 'flex' : 'none';
+  document.getElementById('choice-section').style.display = on ? 'none' : '';
+  document.getElementById('phase-pill').textContent = on ? '天机演算' : '阅读';
+  document.getElementById('phase-pill').className = on ? 'phase-pill narrating' : 'phase-pill';
+};
+
+/* ---------- 推进回合 ---------- */
+UI._setGeneratingUI = function (on) {
+  var ct = document.getElementById('custom-text');
+  var bc = document.getElementById('btn-custom');
+  if (ct) ct.disabled = on;
+  if (bc) bc.disabled = on;
+  var grid = document.getElementById('choice-grid');
+  if (grid) grid.querySelectorAll('.choice-card').forEach(function (el) {
+    if (on) el.classList.add('disabled'); else el.classList.remove('disabled');
+  });
+  if (on) {
+    var ctxt = document.querySelector('#computing .ctxt');
+    if (ctxt) ctxt.textContent = '天机推演中…';
+  }
+};
+
+UI.confirmTurn = async function (isCustom) {
+  if (UI.room) return UI.confirmRoomTurn(isCustom);
+  if (UI.isGenerating) return;
+  let action;
+  if (isCustom) {
+    const text = document.getElementById('custom-text').value.trim();
+    if (!text) { UI.toast('请输入自定义行动'); return; }
+    action = { custom: { text: text } };
+  } else {
+    if (!UI.selectedChoiceId) { UI.toast('请选择 A / B / C'); return; }
+    action = { choiceId: UI.selectedChoiceId };
+  }
+  UI.isGenerating = true;
+  UI.generationRequestId += 1;
+  const myId = UI.generationRequestId;
+  UI.showComputing(true);
+  UI._setGeneratingUI(true);
+  UI.selectedChoiceId = null;
+  document.getElementById('btn-confirm').disabled = true;
+  document.getElementById('custom-text').value = '';
+  try {
+    await Story.playTurn(action);
+    if (myId !== UI.generationRequestId) return;
+    Story.save();
+    UI.renderChapter();
+  } catch (e) {
+    if (myId !== UI.generationRequestId) return;
+    UI.toast('演算失败：' + e.message);
+    UI.showComputing(false);
+  } finally {
+    if (myId === UI.generationRequestId) {
+      UI.isGenerating = false;
+      UI._setGeneratingUI(false);
+    }
+  }
+};
+
+UI.regenChapter = async function () {
+  // 房间模式下回合由统一结算生成，单个玩家不能重写公共章节
+  if (UI.room) { UI.toast('房间模式下不支持重写本章'); return; }
+  UI.showComputing(true);
+  try {
+    const r = await Story.regenerateChapter();
+    UI.renderChapter();
+    UI.toast(r ? '本章已重写（世界状态不变）' : '重写失败');
+  } catch (e) { UI.toast('重写失败：' + e.message); }
+  finally { UI.showComputing(false); }
+};
+
+/* ---------- 存档 / 读档 / 迁移（Sprint 5） ---------- */
+
+/** 继续上一局：优先 V3.1 房间存档，回退 V3 单人存档（自动迁移为房间） */
+UI.continueGame = function () {
+  // 1. 优先读取 V3.1 房间存档
+  if (Room.RoomSave.hasSave()) {
+    var room = Room.RoomSave.load();
+    if (room && room.storySession && room.storySession.story && room.storySession.story.currentChapter) {
+      UI.room = room;
+      // 观察者默认回房主席位（若房主为真人，否则回第一个真人席位）
+      UI.viewerSeatId = room.hostSeatId;
+      var host = room.seats.find(function (s) { return s.seatId === room.hostSeatId; });
+      if (!host || host.kind !== 'human') {
+        var firstHuman = room.seats.find(function (s) { return s.kind === 'human'; });
+        if (firstHuman) UI.viewerSeatId = firstHuman.seatId;
+      }
+      UI._lastRoomRound = room.turn.round;
+      UI.switchScreen('game');
+      UI.renderChapter();
+      UI.toast('已载入房间存档（第 ' + room.turn.round + ' 回合）');
+      return;
+    }
+    UI.toast('房间存档损坏，尝试读取 V3 存档');
+  }
+  // 2. 回退 V3 单人存档：迁移为房间后继续
+  if (Story.hasSave()) {
+    var v3Save = Room.RoomSave.readV3Save();
+    if (!v3Save) v3Save = Story.save();  // 兜底：从内存状态生成
+    var migrated = Room.RoomSave.migrate(v3Save);
+    if (migrated && migrated.storySession && migrated.storySession.story && migrated.storySession.story.currentChapter) {
+      UI.room = migrated;
+      UI.viewerSeatId = migrated.hostSeatId;
+      UI._lastRoomRound = migrated.turn.round;
+      // 迁移后立即写入 V3.1 存档（后续自动用 V3.1 流程）
+      Room.RoomSave.save(migrated.roomId);
+      UI.switchScreen('game');
+      UI.renderChapter();
+      UI.toast('V3 存档已迁移为房间存档');
+      return;
+    }
+    UI.toast('V3 存档损坏，请重新开界');
+    return;
+  }
+  UI.toast('无存档');
+};
+
+/** 手动存档（房间模式写 V3.1 存档，单人模式写 V3 存档） */
+UI.saveRoom = function () {
+  if (UI.room) {
+    var data = Room.RoomSave.save(UI.room.roomId);
+    if (data) UI.toast('已存档（第 ' + UI.room.turn.round + ' 回合）');
+    else UI.toast('存档失败');
+  } else if (Story.state) {
+    Story.save();
+    UI.toast('已存档');
+  } else {
+    UI.toast('尚无对局可存');
+  }
+};
+
+/** 导出本局修行录（下载 .txt） */
+UI.exportLog = function () {
+  if (!UI.room) { UI.toast('仅房间模式支持导出修行录'); return; }
+  var text = Room.RoomSave.exportLog(UI.room.roomId);
+  if (!text) { UI.toast('导出失败'); return; }
+  UI._downloadText('修行录_' + (UI.room.settings.seed || UI.room.roomId) + '.txt', text);
+  UI.toast('修行录已导出');
+};
+
+/** 导出房间世界遗产包（下载 .json） */
+UI.exportWorldLegacy = function () {
+  if (!UI.room) { UI.toast('仅房间模式支持导出世界遗产包'); return; }
+  var json = Room.RoomSave.exportWorldLegacy(UI.room.roomId);
+  if (!json) { UI.toast('导出失败'); return; }
+  UI._downloadText('世界遗产_' + (UI.room.settings.seed || UI.room.roomId) + '.json', json);
+  UI.toast('世界遗产包已导出');
+};
+
+/** 触发浏览器下载文本文件 */
+UI._downloadText = function (filename, content) {
+  try {
+    var blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  } catch (e) { UI.toast('下载失败：' + e.message); }
+};
+
+/* ---------- 世界志抽屉 ---------- */
+UI.openDrawer = function () { document.getElementById('drawer').classList.add('show'); document.getElementById('drawer-overlay').classList.add('show'); UI.renderDrawer(); };
+UI.closeDrawer = function () { document.getElementById('drawer').classList.remove('show'); document.getElementById('drawer-overlay').classList.remove('show'); };
+UI.renderDrawer = function () {
+  const tab = UI.drawerTab;
+  const body = document.getElementById('drawer-body');
+  const arch = Story.getWorldArchive();
+  if (!arch) { body.innerHTML = '<div class="arch-empty">尚未开局。</div>'; return; }
+  if (tab === 'cast') {
+    body.innerHTML = '<h4>本章人物</h4><div class="arch-cast">' + arch.cast.map(function (a) {
+      return '<div class="cast-card"><div class="cn">' + UI.esc(a.name) + ' <span style="font-size:11px;color:var(--text-dim)">·' + UI.esc(a.daoPath) + '</span></div>' +
+        '<div class="ci">' + UI.esc(a.identity) + ' · ' + UI.esc(a.status) + '</div>' +
+        '<div class="cw">愿：' + UI.esc(a.publicWish || '—') + '</div>' +
+        (a.relationHints && Object.keys(a.relationHints).length ? '<div class="cr">关系：' + Object.keys(a.relationHints).map(function (k) { return UI.esc(k) + '(' + UI.esc(a.relationHints[k]) + ')'; }).join('、') + '</div>' : '') +
+        '</div>';
+    }).join('') + '</div>';
+  } else if (tab === 'rumors') {
+    body.innerHTML = '<h4>世界传闻</h4>' + (arch.rumors.length ? '<ul class="arch-list">' + arch.rumors.map(function (r) { return '<li>' + UI.esc(r) + '</li>'; }).join('') + '</ul>' : '<div class="arch-empty">风平浪静。</div>');
+    body.innerHTML += '<h4>势力</h4>' + (arch.factions.length ? '<ul class="arch-list">' + arch.factions.map(function (f) { return '<li>' + UI.esc(f.name) + '（势力 ' + f.power + '·' + UI.esc(f.stance) + '）</li>'; }).join('') + '</ul>' : '<div class="arch-empty">无。</div>');
+    body.innerHTML += '<h4>遗物</h4>' + (arch.relics.length ? '<ul class="arch-list">' + arch.relics.map(function (r) { return '<li>' + UI.esc(r.name) + '</li>'; }).join('') + '</ul>' : '<div class="arch-empty">尚无。</div>');
+  } else if (tab === 'chronicle') {
+    body.innerHTML = '<h4>修真编年史</h4>' + (arch.chronicle.length ? '<ul class="arch-list">' + arch.chronicle.slice().reverse().map(function (c) { return '<li>' + UI.esc(c.text) + '</li>'; }).join('') + '</ul>' : '<div class="arch-empty">史册未开。</div>');
+  } else if (tab === 'karma') {
+    body.innerHTML = '<h4>未结因果</h4>' + (arch.activeHooks.length ? '<ul class="arch-list">' + arch.activeHooks.map(function (h) { return '<li>' + UI.esc(typeof h === 'string' ? h : (h.text || h.name || JSON.stringify(h))) + '</li>'; }).join('') + '</ul>' : '<div class="arch-empty">因果清明。</div>');
+  } else if (tab === 'replay') {
+    UI.renderReplay(body);
+  } else if (tab === 'omni') {
+    const o = Story.getOmniscientView();
+    let html = '<h4>天机全览 <span style="font-size:9px;color:var(--red)">开发者</span></h4>';
+    // 房间模式：显示各席位落子状态与机器人选择
+    if (UI.room && UI.room.storySession) {
+      var room = UI.room;
+      html += '<h4>本回合落子（第 ' + room.turn.round + ' 回合 · ' + UI.esc(room.turn.phase) + '）</h4>';
+      html += '<div class="arch-cast">' + room.seats.map(function (s) {
+        if (s.kind === 'empty') return '';
+        var actorName = s.actorSetup ? s.actorSetup.name : (s.displayName || '—');
+        var submitted = s.actorId && room.turn.submittedActorIds.indexOf(s.actorId) >= 0;
+        var action = s.actorId && room.turn.actionsByActorId[s.actorId];
+        var actionTxt = '未落子';
+        if (submitted && action) {
+          if (action.choiceId) actionTxt = '选 ' + UI.esc(action.choiceId);
+          else if (action.custom) actionTxt = '自定义：' + UI.esc(action.custom.text);
+        } else if (submitted) {
+          actionTxt = '已落子';
+        }
+        var botInfo = s.kind === 'bot' ? ' <span style="color:var(--text-faint)">[' + UI.esc(s.controller.botProfileId || 'bot') + ']</span>' : '';
+        return '<div class="cast-card"><div class="cn">' + UI.esc(actorName) + botInfo + '</div>' +
+          '<div class="ci">' + UI.esc(s.kind) + ' · ' + (submitted ? '✓ 已落子' : '待落子') + '</div>' +
+          '<div class="cw">' + actionTxt + '</div></div>';
+      }).join('') + '</div>';
+    }
+    html += o.actors.map(function (a) {
+      return '<div class="omni-box"><div class="ot">' + UI.esc(a.name) + '</div>' +
+        '<div>隐藏命数：' + UI.esc(a.hiddenFate || '—') + '</div>' +
+        '<div>上轮选择：' + UI.esc(a.aiChosenLastTurn || '—') + '</div>' +
+        '<div>私密事实：' + (a.privateFacts.length ? a.privateFacts.map(UI.esc).join('；') : '无') + '</div>' +
+        '<div>隐藏数值：境界 ' + UI.esc(a.hidden.realm) + ' · 修为 ' + a.hidden.cultivationProgress + ' · 伤势 ' + a.hidden.injury + '</div>' +
+        '</div>';
+    }).join('');
+    if (o.chronicleRumors && o.chronicleRumors.length) {
+      html += '<h4>野史（扭曲传闻）</h4><ul class="arch-list">' + o.chronicleRumors.map(function (r) { return '<li>' + UI.esc(r.year + '年：' + r.text) + '</li>'; }).join('') + '</ul>';
+    }
+    body.innerHTML = html;
+  }
+};
+
+/** 渲染回合回放（基于 eventLog + 编年史） */
+UI.renderReplay = function (body) {
+  if (!UI.room) {
+    body.innerHTML = '<div class="arch-empty">回放仅房间模式可用。</div>';
+    return;
+  }
+  var timeline = Room.RoomSave.replayTimeline(UI.room.roomId);
+  var html = '<h4>回合回放 <span style="font-size:9px;color:var(--text-faint)">' + timeline.length + ' 回合</span></h4>';
+  // 导出按钮
+  html += '<div class="replay-actions" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">';
+  html += '<button class="btn sm" id="btn-export-log">导出修行录</button>';
+  html += '<button class="btn sm ghost" id="btn-export-world">导出世界遗产包</button>';
+  html += '</div>';
+  if (!timeline.length) {
+    html += '<div class="arch-empty">尚无回放数据。</div>';
+  } else {
+    html += '<div class="replay-timeline">';
+    timeline.forEach(function (rd) {
+      html += '<div class="replay-round">';
+      html += '<div class="rr-head">第 ' + rd.round + ' 回合 · ' + UI.esc(rd.chapterTitle || '—') + '</div>';
+      if (rd.actions.length) {
+        html += '<div class="rr-actions">落子：' + rd.actions.map(function (ac) {
+          var seat = UI.room.seats.find(function (s) { return s.seatId === ac.seatId; });
+          var name = seat ? (seat.actorSetup ? seat.actorSetup.name : seat.displayName) : ac.actorId;
+          return UI.esc(name);
+        }).join('、') + '</div>';
+      }
+      if (rd.chapterText) {
+        html += '<div class="rr-text">' + UI.esc(rd.chapterText) + '</div>';
+      }
+      html += '</div>';
+    });
+    html += '</div>';
+  }
+  body.innerHTML = html;
+  var btnLog = document.getElementById('btn-export-log');
+  if (btnLog) btnLog.addEventListener('click', UI.exportLog);
+  var btnWorld = document.getElementById('btn-export-world');
+  if (btnWorld) btnWorld.addEventListener('click', UI.exportWorldLegacy);
+};
+
+/* ---------- 设置 ---------- */
+UI.openSettings = function () {
+  document.getElementById('set-ai-on').value = UI.settings.aiOn ? '1' : '0';
+  document.getElementById('set-base').value = UI.settings.base || '';
+  document.getElementById('set-key').value = '';
+  document.getElementById('set-key').placeholder = Story.getApiKey() ? '本次会话已设置；留空保持不变' : 'sk-...（刷新后需重新输入）';
+  document.getElementById('set-model').value = UI.settings.model || 'gpt-4o-mini';
+  document.getElementById('set-temp').value = UI.settings.temperature;
+  document.getElementById('set-pace').value = UI.settings.narrativePace || '常规';
+  UI.renderAIStatus(Story.getAIStatus());
+  document.getElementById('set-modal').classList.add('show');
+};
+UI.saveSettings = function () {
+  UI.settings.aiOn = document.getElementById('set-ai-on').value === '1';
+  UI.settings.base = document.getElementById('set-base').value.trim();
+  UI.settings.model = document.getElementById('set-model').value.trim() || 'gpt-4o-mini';
+  UI.settings.temperature = parseFloat(document.getElementById('set-temp').value) || 0.8;
+  UI.settings.narrativePace = document.getElementById('set-pace').value;
+  var enteredKey = document.getElementById('set-key').value.trim();
+  if (enteredKey) Story.setApiKey(enteredKey); // 留空时保留本次会话已有 Key
+  Story.saveSettings({ aiOn: UI.settings.aiOn, base: UI.settings.base, model: UI.settings.model, temperature: UI.settings.temperature, narrativePace: UI.settings.narrativePace, mode: 'novel' });
+  UI.syncAI();
+  if (Story.state) { Story.state.settings.narrativePace = UI.settings.narrativePace; }
+  // 房间模式：同步房间设置
+  if (UI.room) {
+    UI.room.settings.narrativePace = UI.settings.narrativePace;
+    UI.room.settings.aiNarrationMode = UI.settings.aiOn ? 'host-byok' : 'offline';
+  }
+  document.getElementById('set-modal').classList.remove('show');
+  UI.toast('设置已保存' + (Story.getApiKey() ? '（Key 仅存本次会话）' : ''));
+};
+UI.loadSettings = function () {
+  const s = Story.loadSettings();
+  if (s) {
+    UI.settings.aiOn = s.aiOn ? 1 : 0;
+    UI.settings.base = s.base || '';
+    UI.settings.model = s.model || 'gpt-4o-mini';
+    UI.settings.temperature = (typeof s.temperature === 'number') ? s.temperature : 0.8;
+    UI.settings.narrativePace = s.narrativePace || '常规';
+  }
+};
+UI._chatEndpoint = function (base) {
+  base = String(base || '').trim().replace(/\/+$/, '');
+  return /\/chat\/completions$/i.test(base) ? base : base + '/chat/completions';
+};
+UI._modelsEndpoint = function (base) {
+  base = String(base || '').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/i, '');
+  return base + '/models';
+};
+UI._readApiError = async function (resp) {
+  var detail = '';
+  try { detail = (await resp.text()).slice(0, 500); } catch (e) {}
+  throw new Error('HTTP ' + resp.status + (detail ? '：' + detail : ''));
+};
+UI._parseModelJson = function (text) {
+  text = String(text || '').trim();
+  if (text.indexOf('```') === 0) text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  return JSON.parse(text);
+};
+UI._buildNarratorPrompt = function (ctx) {
+  return [
+    '你是叙事润色器，不是游戏引擎。世界状态已由本地裁决系统确定，你不得改变任何状态。',
+    '只返回 {title, chapter, dialogues, endingImage} 四个字段。严禁返回 choices、statePatch、newFacts、newRumors、newHooks、newRelics、changedRelations、timePassed 等状态字段。',
+    '正文字数 450-850 中文字符，3-5 段。不得使用以下模板句：行动真正开始后最先出现的不是预想中的结果而是阻力；这条规则让简单的尝试多出一层代价；暗处有人观察；几条原本互不相干的动向在此刻交汇。',
+    '只返回一个严格 JSON 对象，不要 Markdown。',
+    'chosenActions 是本回合已经发生且不可忽略的角色决定。正文必须落实行动的叙事呈现；尤其是 isCustom=true 的行动，必须成为本章主要因果线。你只负责呈现这些行动的后果与场景，不得改变世界状态。',
+    '若行动受阻，要写清阻力来自哪条世界规则，并让行动产生部分成功、代价、线索或关系变化，不能悄悄替换玩家意图。',
+    '禁止无触发的高境界突破、永久死亡、飞升、顶级法宝、大势力覆灭或改写既有事实；不得向玩家视角泄露其他角色秘密。',
+    '如果上下文包含 protocolCorrection，说明上一份 JSON 校验失败；必须逐条修正 previousErrors，并重新返回完整章节，不能只解释错误。',
+  ].join('\n');
+};
+UI._buildAIProvider = function () {
+  var base = UI.settings.base;
+  var model = UI.settings.model;
+  var isDeepSeek = /^https:\/\/api\.deepseek\.com(?:\/|$)/i.test(base);
+  return {
+    narrate: async function (ctx) {
+      var key = Story.getApiKey();
+      if (!key) throw new Error('API Key 未设置或已因刷新而失效');
+      var actionBrief = (ctx.chosenActions || []).map(function (a) {
+        return a.actorId + (a.isCustom ? '（自定义）' : '') + '：' + a.publicAction;
+      }).join('\n');
+      var user = '本回合必须落实的行动：\n' + (actionBrief || '开局，无前置行动') + '\n\n完整世界上下文 JSON：\n' + JSON.stringify(ctx);
+      var body = {
+        model: model,
+        temperature: UI.settings.temperature,
+        max_tokens: ctx.mode === 'opening' ? 7000 : 4096,
+        stream: false,
+        messages: [{ role: 'system', content: UI._buildNarratorPrompt(ctx) }, { role: 'user', content: user }],
+        response_format: { type: 'json_object' },
+      };
+      if (isDeepSeek) body.thinking = { type: 'disabled' };
+      var resp = await fetch(UI._chatEndpoint(base), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) await UI._readApiError(resp);
+      var payload = await resp.json();
+      var choice = payload.choices && payload.choices[0];
+      if (!choice || !choice.message) throw new Error('API 响应缺少 choices[0].message');
+      if (choice.finish_reason === 'length') throw new Error('模型输出被 max_tokens 截断');
+      return UI._parseModelJson(choice.message.content || '');
+    },
+    test: async function () {
+      var key = Story.getApiKey();
+      if (!key) throw new Error('请先输入 API Key');
+      var resp = await fetch(UI._modelsEndpoint(base), { headers: { 'Authorization': 'Bearer ' + key } });
+      if (!resp.ok) await UI._readApiError(resp);
+      var payload = await resp.json();
+      var models = (payload.data || []).map(function (m) { return m.id; });
+      return { ok: true, models: models, selectedModelFound: models.indexOf(model) >= 0 };
+    },
+  };
+};
+UI._errorCodeReason = function (code) {
+  var map = {
+    'NO_API_CONFIG': 'AI 已开启，但缺少可用 Provider。',
+    'NO_API_KEY': 'API Key 未设置或已失效。',
+    'TIMEOUT': 'API 请求超时。',
+    'EMPTY_RESPONSE': 'API 返回空内容。',
+    'INVALID_JSON': '接口返回内容不是可解析章节 JSON。',
+    'INVALID_SCHEMA': '接口返回字段不合规。',
+    'HTTP_401': '接口返回 401 未授权（Key 可能错误）。',
+    'HTTP_403': '接口返回 403 禁止访问。',
+    'HTTP_404': '接口返回 404，端点不存在。',
+    'HTTP_429': '接口返回 429 限流。',
+    'HTTP_5XX': '接口返回 5xx 服务端错误。',
+    'NETWORK_ERROR': '网络错误，无法连接接口。',
+    'CORS_ERROR': '浏览器跨域拦截，无法直连该接口。',
+    'MODEL_OVERREACH': '模型越权返回了状态字段，已忽略。',
+  };
+  return map[code] || '未知错误。';
+};
+UI._classifyHttpCode = function (status) {
+  if (status === 401) return 'HTTP_401';
+  if (status === 403) return 'HTTP_403';
+  if (status === 404) return 'HTTP_404';
+  if (status === 429) return 'HTTP_429';
+  if (status >= 500) return 'HTTP_5XX';
+  return 'NETWORK_ERROR';
+};
+UI._provenanceLabel = function (provenance, status) {
+  if (!provenance) return '';
+  if (provenance === 'ai-json') {
+    if (status && status.message && status.message.indexOf('自动修复') >= 0) return 'AI 文本已修复';
+    return 'AI 生成';
+  }
+  if (provenance === 'ai-plain') return 'AI 纯文本模式';
+  if (provenance === 'offline-resolved') return '离线裁决摘要';
+  if (provenance === 'legacy') return '历史章节';
+  return '';
+};
+UI._desensitize = function (text) {
+  return String(text == null ? '' : text).replace(/sk-[A-Za-z0-9]+/g, 'sk-***');
+};
+UI.renderAIStatus = function (status) {
+  status = status || Story.getAIStatus();
+  var badge = document.getElementById('ai-status');
+  var detail = document.getElementById('set-ai-status');
+  var labels = { disabled:'本地', unavailable:'未连接', ready:'就绪', testing:'检测中', requesting:'请求中', retrying:'格式重试', received:'校验中', success:'已生成', fallback:'已回退' };
+  var prov = (Story.state && Story.state.story && Story.state.story.currentChapter) ? Story.state.story.currentChapter.provenance : '';
+  var provLabel = UI._provenanceLabel(prov, status);
+  if (badge) {
+    var stateLabel = labels[status.state] || status.state;
+    badge.textContent = 'AI：' + stateLabel + (provLabel ? ' · ' + provLabel : '');
+    badge.className = 'api-status ' + status.state;
+    var diag = [];
+    diag.push('生成来源：' + (provLabel || '—'));
+    if (status.model) diag.push('模型：' + status.model);
+    if (status.lastRequestAt) {
+      var end = status.lastSuccessAt || status.updatedAt;
+      diag.push('耗时：' + Math.max(0, end - status.lastRequestAt) + 'ms');
+    }
+    if (status.state === 'fallback' && status.code) {
+      diag.push('错误码：' + status.code);
+      diag.push('原因：' + UI._errorCodeReason(status.code));
+    }
+    var usedLocal = (prov && prov.indexOf('offline') === 0) || status.state === 'fallback';
+    diag.push('本地裁决：' + (usedLocal ? '是' : '否'));
+    badge.title = diag.join('\n');
+  }
+  if (detail) {
+    var detailText = status.message || '无状态';
+    if (status.state === 'fallback' && status.code) {
+      detailText = 'AI 文本生成失败，已使用离线裁决摘要。原因：' + UI._errorCodeReason(status.code);
+    }
+    detail.textContent = detailText + (status.error ? '\n错误：' + UI._desensitize(status.error) : '') +
+      (status.model ? '\n模型：' + status.model : '') + (status.base ? '\n地址：' + status.base : '');
+  }
+};
+UI.syncAI = function () {
+  Story.setAIEnabled(!!UI.settings.aiOn);
+  var meta = { provider: 'openai-compatible', base: UI.settings.base, model: UI.settings.model };
+  if (UI.settings.aiOn && UI.settings.base && Story.getApiKey()) Story.registerAIProvider(UI._buildAIProvider(), meta);
+  else Story.registerAIProvider(null, meta);
+  UI.renderAIStatus(Story.getAIStatus());
+};
+UI.testAIConnection = async function () {
+  UI.settings.aiOn = document.getElementById('set-ai-on').value === '1';
+  UI.settings.base = document.getElementById('set-base').value.trim();
+  UI.settings.model = document.getElementById('set-model').value.trim() || 'gpt-4o-mini';
+  var key = document.getElementById('set-key').value.trim();
+  if (key) Story.setApiKey(key);
+  UI.syncAI();
+  if (!Story.ai.provider || !Story.ai.provider.test) { UI.renderAIStatus(Story.getAIStatus()); return; }
+  // 第一步：/models 列表预检（用于模型下拉与基本连通性）
+  Story.setAIStatus('testing', { message: '正在测试 API 地址、Key 与模型列表……' });
+  try {
+    var result = await Story.ai.provider.test();
+    if (!result.selectedModelFound) throw new Error('连接成功，但模型列表中没有“' + UI.settings.model + '”');
+  } catch (e) {
+    var hint = /Failed to fetch|NetworkError/i.test(e.message) ? '；可能是 CORS、网络或代理配置问题' : '';
+    Story.setAIStatus('unavailable', { code: 'connection_test_failed', message: '连接测试失败' + hint + '。', error: e.message });
+    return;
+  }
+  // 第二步：叙事探针 —— 发送一个真实的小型叙事请求，最终就绪与否取决于此
+  Story.setAIStatus('testing', { message: '正在发送叙事探针，验证模型可生成章节 JSON……' });
+  var probeBase = UI.settings.base;
+  var probeModel = UI.settings.model;
+  var probeKey = Story.getApiKey();
+  var isDeepSeek = /^https:\/\/api\.deepseek\.com(?:\/|$)/i.test(probeBase);
+  var probeBody = {
+    model: probeModel,
+    max_tokens: 256,
+    temperature: 0,
+    stream: false,
+    messages: [
+      { role: 'system', content: '只返回 JSON。' },
+      { role: 'user', content: '请只返回：{"title":"测试","chapter":"雨落在空城石阶上。"}' },
+    ],
+    response_format: { type: 'json_object' },
+  };
+  if (isDeepSeek) probeBody.thinking = { type: 'disabled' };
+  var rawText = '';
+  try {
+    var resp = await fetch(UI._chatEndpoint(probeBase), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + probeKey },
+      body: JSON.stringify(probeBody),
+    });
+    if (!resp.ok) {
+      try { rawText = await resp.text(); } catch (e) {}
+      var hcode = UI._classifyHttpCode(resp.status);
+      Story.setAIStatus('unavailable', {
+        code: hcode,
+        message: '叙事探针失败：HTTP ' + resp.status + '。原因：' + UI._errorCodeReason(hcode) + '\n响应：' + UI._desensitize(rawText).slice(0, 300),
+        error: 'HTTP ' + resp.status,
+      });
+      return;
+    }
+    var payload = await resp.json();
+    var choice = payload.choices && payload.choices[0];
+    if (!choice || !choice.message) {
+      var payloadText = UI._desensitize(JSON.stringify(payload)).slice(0, 300);
+      Story.setAIStatus('unavailable', {
+        code: 'EMPTY_RESPONSE',
+        message: '叙事探针失败：API 响应缺少 choices[0].message。原因：' + UI._errorCodeReason('EMPTY_RESPONSE') + '\n响应：' + payloadText,
+        error: '缺少 choices[0].message',
+      });
+      return;
+    }
+    var contentText = choice.message.content || '';
+    var parsed;
+    try { parsed = UI._parseModelJson(contentText); }
+    catch (je) {
+      Story.setAIStatus('unavailable', {
+        code: 'INVALID_JSON',
+        message: '叙事探针失败：返回内容不是可解析 JSON。原因：' + UI._errorCodeReason('INVALID_JSON') + '\n响应：' + UI._desensitize(contentText).slice(0, 300),
+        error: je.message,
+      });
+      return;
+    }
+    var probeTitle = parsed && parsed.title;
+    var probeChapter = parsed && parsed.chapter;
+    var chapterEmpty = !probeChapter ||
+      (typeof probeChapter === 'string' && !probeChapter.trim()) ||
+      (Array.isArray(probeChapter) && probeChapter.length === 0);
+    if (!probeTitle || chapterEmpty) {
+      Story.setAIStatus('unavailable', {
+        code: 'INVALID_SCHEMA',
+        message: '叙事探针失败：返回章节缺少 title 或 chapter。原因：' + UI._errorCodeReason('INVALID_SCHEMA') + '\n响应：' + UI._desensitize(contentText).slice(0, 300),
+        error: '缺少 title 或 chapter',
+      });
+      return;
+    }
+    Story.setAIStatus('ready', { message: '叙事探针测试通过。' });
+  } catch (e) {
+    var netCode = /Failed to fetch|NetworkError/i.test(e.message) ? 'NETWORK_ERROR' : 'NETWORK_ERROR';
+    Story.setAIStatus('unavailable', {
+      code: netCode,
+      message: '叙事探针失败：网络错误。原因：' + UI._errorCodeReason(netCode) + '\n错误：' + UI._desensitize(e.message).slice(0, 300),
+      error: e.message,
+    });
+  }
+};
+
+/* ============================================================
+ * V3.1 房间大厅与房间回合
+ * ============================================================ */
+
+/** 从开界屏创建房间，进入大厅 */
+UI.createRoom = function () {
+  var seed = document.getElementById('seed-input').value.trim() || ('V31-' + Math.floor(Math.random() * 99999));
+  document.getElementById('seed-input').value = seed;
+  // 若尚未掷骰，自动掷一次（保证世界命盘已生成）
+  if (!UI.currentRoll || UI.currentRoll.seed !== seed) UI.doRoll(seed);
+  var hostName = (document.getElementById('su-name').value || '').trim() || '房主';
+  if (typeof Room === 'undefined') { UI.toast('room-core.js 未加载'); return; }
+  // 从开界屏读取模式选择
+  var modeSelect = document.getElementById('su-mode');
+  var mode = modeSelect ? modeSelect.value : 'local-solo';
+  UI.room = Room.transport.sendSync({ type: 'createRoom', config: {
+    hostName: hostName,
+    mode: mode,
+    seed: seed,
+    narrativePace: UI.settings.narrativePace || '常规',
+  } });
+  UI.viewerSeatId = UI.room.hostSeatId;
+  // 直接用开界屏的立命信息绑定房主角色，免去大厅重复立命
+  var dao = document.getElementById('su-dao').value;
+  var hostSetup = {
+    name: hostName,
+    identity: (document.getElementById('su-identity').value || '').trim() || '外门弟子',
+    daoPath: dao,
+    publicWish: (document.getElementById('su-wish').value || '').trim(),
+    hiddenFate: (document.getElementById('su-fate').value || '').trim(),
+    personalityTags: Story.PERSONALITY_TAGS[dao] ? Story.PERSONALITY_TAGS[dao].slice(0, 2) : ['探索'],
+  };
+  try {
+    Room.transport.sendSync({ type: 'assignActorToSeat', roomId: UI.room.roomId, seatId: UI.room.hostSeatId, actorSetup: hostSetup });
+    UI.room.seats[0].displayName = hostSetup.name;
+  } catch (e) { /* 忽略，大厅可重新立命 */ }
+
+  // A local-solo room means one human plus three companions. Provision that
+  // invariant here so users do not land in a "single-player" lobby whose
+  // start button can never become enabled without manual multiplayer setup.
+  if (mode === 'local-solo') {
+    try {
+      Room.transport.sendSync({ type: 'setSeatReady', roomId: UI.room.roomId, seatId: UI.room.hostSeatId, ready: true });
+      UI.room.seats.forEach(function (seat, i) {
+        if (i === 0 || seat.kind !== 'empty') return;
+        Room.transport.sendSync({
+          type: 'addBotSeat',
+          roomId: UI.room.roomId,
+          seatIndex: i,
+          botConfig: { profileId: ['pursuer', 'profitSeeker', 'guardian'][i - 1] || 'wanderer', presetIndex: i - 1 },
+        });
+      });
+    } catch (e) {
+      UI.toast('单人房间初始化失败：' + e.message);
+    }
+  }
+  UI.switchScreen('lobby');
+  UI.renderLobby();
+  return UI.room;
+};
+
+/** 渲染大厅席位卡 */
+UI.renderLobby = function () {
+  if (!UI.room) return;
+  var room = UI.room;
+  document.getElementById('lobby-seed').textContent = room.settings.seed || '—';
+  document.getElementById('lobby-mode').textContent = room.mode === 'local-hotseat' ? '热座' : '单人';
+
+  var seatNames = ['一', '二', '三', '四'];
+  var grid = document.getElementById('seat-grid');
+  grid.innerHTML = room.seats.map(function (seat, i) {
+    var cls = 'seat-card ' + seat.kind;
+    if (seat.seatId === room.hostSeatId) cls += ' host';
+    if (seat.ready) cls += ' ready';
+    var html = '<div class="' + cls + '" data-seat="' + seat.seatId + '">';
+    html += '<div class="seat-head">';
+    html += '<span class="seat-num">第' + seatNames[i] + '席</span>';
+    if (seat.seatId === room.hostSeatId) html += '<span class="seat-host-badge">★房主</span>';
+    var kindLabel = seat.kind === 'human' ? '真人' : seat.kind === 'bot' ? '机器人' : '空席';
+    html += '<span class="seat-kind ' + seat.kind + '">' + kindLabel + '</span>';
+    html += '</div>';
+    html += '<div class="seat-body">';
+    if (seat.kind === 'empty') {
+      html += '<div class="seat-empty-placeholder">虚位以待</div>';
+    } else {
+      html += '<div class="seat-name">' + UI.esc(seat.displayName || '—') + '</div>';
+      if (seat.actorSetup) {
+        html += '<div class="seat-actor">' + UI.esc(seat.actorSetup.name) + ' <span class="sa-dao">·' + UI.esc(seat.actorSetup.daoPath) + '</span></div>';
+      } else {
+        html += '<div class="seat-status">尚未立命</div>';
+      }
+      if (seat.ready) html += '<div class="seat-status ready">✓ 已准备</div>';
+      else if (seat.actorSetup) html += '<div class="seat-status">待准备</div>';
+    }
+    html += '</div>';
+    html += '<div class="seat-actions">';
+    if (seat.kind === 'empty') {
+      html += '<button class="btn sm ghost" data-act="addbot" data-idx="' + i + '">加机器人</button>';
+      if (room.mode === 'local-hotseat') html += '<button class="btn sm ghost" data-act="addhuman" data-idx="' + i + '">加真人</button>';
+    } else if (seat.kind === 'human') {
+      if (!seat.actorSetup) html += '<button class="btn sm" data-act="setup" data-seat="' + seat.seatId + '">立命</button>';
+      else {
+        html += '<button class="btn sm ghost" data-act="setup" data-seat="' + seat.seatId + '">修改</button>';
+        if (!seat.ready) html += '<button class="btn sm primary" data-act="ready" data-seat="' + seat.seatId + '">准备</button>';
+        else html += '<button class="btn sm ghost" data-act="unready" data-seat="' + seat.seatId + '">取消准备</button>';
+      }
+    } else if (seat.kind === 'bot') {
+      html += '<button class="btn sm ghost" data-act="remove" data-seat="' + seat.seatId + '">移除</button>';
+    }
+    html += '</div></div>';
+    return html;
+  }).join('');
+
+  grid.querySelectorAll('[data-act]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var act = btn.getAttribute('data-act');
+      var sid = btn.getAttribute('data-seat');
+      var idx = parseInt(btn.getAttribute('data-idx'), 10);
+      if (act === 'addbot') UI.openAddBot(idx);
+      else if (act === 'addhuman') UI.addHumanSeat(idx);
+      else if (act === 'setup') UI.openActorSetup(sid);
+      else if (act === 'ready') UI.toggleReady(sid, true);
+      else if (act === 'unready') UI.toggleReady(sid, false);
+      else if (act === 'remove') UI.removeSeat(sid);
+    });
+  });
+  UI.updateLobbyStart();
+};
+
+UI.updateLobbyStart = function () {
+  if (!UI.room) return;
+  var room = UI.room;
+  var occupied = room.seats.filter(function (s) { return s.kind === 'human' || s.kind === 'bot'; });
+  var hasHuman = occupied.some(function (s) { return s.kind === 'human'; });
+  var allReady = occupied.length >= 2 && occupied.every(function (s) { return s.ready && s.actorSetup; });
+  document.getElementById('btn-lobby-start').disabled = !(hasHuman && allReady);
+  var hint = document.getElementById('lobby-start-hint');
+  if (hint) {
+    if (hasHuman && allReady) {
+      hint.textContent = room.mode === 'local-solo'
+        ? '三位同伴已就绪，可以开始单人游戏。'
+        : '所有席位已就绪，可以开局。';
+    } else if (occupied.length < 2) {
+      hint.textContent = '至少需要两名入局者；可添加真人或机器人。';
+    } else {
+      var waiting = occupied.filter(function (s) { return !s.actorSetup || !s.ready; });
+      hint.textContent = '仍待立命或准备：' + waiting.map(function (s) { return s.displayName || ('第 ' + (s.index + 1) + ' 席'); }).join('、');
+    }
+  }
+};
+
+/** 添加真人席位（热座模式） */
+UI.addHumanSeat = function (seatIndex) {
+  try {
+    Room.transport.sendSync({ type: 'addHumanSeat', roomId: UI.room.roomId, seatIndex: seatIndex, participant: { displayName: '真人' + (seatIndex + 1) } });
+    UI.renderLobby();
+  } catch (e) { UI.toast(e.message); }
+};
+
+/** 移除席位 */
+UI.removeSeat = function (seatId) {
+  try {
+    Room.transport.sendSync({ type: 'removeSeat', roomId: UI.room.roomId, seatId: seatId });
+    UI.renderLobby();
+  } catch (e) { UI.toast(e.message); }
+};
+
+/** 准备/取消准备 */
+UI.toggleReady = function (seatId, ready) {
+  try {
+    Room.transport.sendSync({ type: 'setSeatReady', roomId: UI.room.roomId, seatId: seatId, ready: ready });
+    UI.renderLobby();
+  } catch (e) { UI.toast(e.message); }
+};
+
+/** 打开添加机器人弹窗 */
+UI.openAddBot = function (seatIndex) {
+  UI._botModalSeat = seatIndex;
+  UI._selectedBotProfile = 'pursuer';
+  var profiles = Room.BOT_PROFILES;
+  var pgrid = document.getElementById('bot-profile-grid');
+  pgrid.innerHTML = Object.keys(profiles).map(function (id) {
+    var p = profiles[id];
+    return '<div class="bot-profile-opt' + (id === 'pursuer' ? ' sel' : '') + '" data-pid="' + id + '">' +
+      '<div class="bp-label">' + UI.esc(p.label) + '</div>' +
+      '<div class="bp-desc">' + UI.esc(p.desc) + '</div></div>';
+  }).join('');
+  pgrid.querySelectorAll('[data-pid]').forEach(function (el) {
+    el.addEventListener('click', function () {
+      pgrid.querySelectorAll('[data-pid]').forEach(function (x) { x.classList.remove('sel'); });
+      el.classList.add('sel');
+      UI._selectedBotProfile = el.getAttribute('data-pid');
+    });
+  });
+  // 可选角色（未被占用的预设）
+  var used = UI.room.seats.filter(function (s) { return s.actorSetup; }).map(function (s) { return s.actorSetup.id; });
+  UI._botAvailable = Room.PRESET_BOT_ACTORS.filter(function (a) { return used.indexOf(a.id) < 0; });
+  var sel = document.getElementById('bot-actor-select');
+  sel.innerHTML = UI._botAvailable.map(function (a, i) {
+    return '<option value="' + i + '">' + UI.esc(a.name) + ' · ' + UI.esc(a.daoPath) + '</option>';
+  }).join('');
+  document.getElementById('bot-modal').classList.add('show');
+};
+
+UI.confirmAddBot = function () {
+  var seatIndex = UI._botModalSeat;
+  var profileId = UI._selectedBotProfile || 'pursuer';
+  var actorIdx = parseInt(document.getElementById('bot-actor-select').value, 10);
+  var botConfig = { profileId: profileId };
+  if (UI._botAvailable[actorIdx]) botConfig.actorTemplate = Object.assign({}, UI._botAvailable[actorIdx]);
+  try {
+    Room.transport.sendSync({ type: 'addBotSeat', roomId: UI.room.roomId, seatIndex: seatIndex, botConfig: botConfig });
+    document.getElementById('bot-modal').classList.remove('show');
+    UI.renderLobby();
+  } catch (e) { UI.toast(e.message); }
+};
+
+/** 打开立命弹窗 */
+UI.openActorSetup = function (seatId) {
+  UI._actorModalSeat = seatId;
+  var seat = UI.room.seats.find(function (s) { return s.seatId === seatId; });
+  if (seat && seat.actorSetup) {
+    document.getElementById('ac-name').value = seat.actorSetup.name || '';
+    document.getElementById('ac-identity').value = seat.actorSetup.identity || '';
+    document.getElementById('ac-dao').value = seat.actorSetup.daoPath || '剑修';
+    document.getElementById('ac-wish').value = seat.actorSetup.publicWish || '';
+    document.getElementById('ac-fate').value = seat.actorSetup.hiddenFate || '';
+  } else {
+    document.getElementById('ac-name').value = seat ? (seat.displayName || '') : '';
+    document.getElementById('ac-identity').value = '青霄宗外门弟子';
+    document.getElementById('ac-dao').value = '剑修';
+    document.getElementById('ac-wish').value = '夺得传承，证明自己不是庸才';
+    document.getElementById('ac-fate').value = '残剑中的剑灵似乎认识我';
+  }
+  document.getElementById('actor-modal').classList.add('show');
+};
+
+UI.confirmActorSetup = function () {
+  var seatId = UI._actorModalSeat;
+  var dao = document.getElementById('ac-dao').value;
+  var setup = {
+    name: document.getElementById('ac-name').value.trim() || '无名修士',
+    identity: document.getElementById('ac-identity').value.trim() || '外门弟子',
+    daoPath: dao,
+    publicWish: document.getElementById('ac-wish').value.trim(),
+    hiddenFate: document.getElementById('ac-fate').value.trim(),
+    personalityTags: Story.PERSONALITY_TAGS[dao] ? Story.PERSONALITY_TAGS[dao].slice(0, 2) : ['探索'],
+  };
+  try {
+    var seat = Room.transport.sendSync({ type: 'assignActorToSeat', roomId: UI.room.roomId, seatId: seatId, actorSetup: setup });
+    // 真人席位的 displayName 同步为角色名
+    if (seat.kind === 'human') seat.displayName = setup.name;
+    document.getElementById('actor-modal').classList.remove('show');
+    UI.renderLobby();
+  } catch (e) { UI.toast(e.message); }
+};
+
+/** 开局 */
+UI.startRoom = async function () {
+  var btn = document.getElementById('btn-lobby-start');
+  var loading = document.getElementById('lobby-loading');
+  try {
+    // 在大厅显示加载遮罩（showComputing 操作的是游戏屏元素，大厅看不到）
+    if (btn) { btn.disabled = true; btn.textContent = '正在开局……'; }
+    if (loading) loading.style.display = 'flex';
+    await Room.transport.send({ type: 'startRoom', roomId: UI.room.roomId });
+    UI._lastRoomRound = UI.room.turn.round;
+    UI.switchScreen('game');
+    UI.renderChapter();
+  } catch (e) {
+    UI.toast('开局失败：' + e.message);
+    console.error('startRoom failed:', e);
+    // 恢复大厅按钮
+    if (btn) { btn.textContent = '开局'; }
+    UI.updateLobbyStart();
+  } finally {
+    if (loading) loading.style.display = 'none';
+    if (btn) btn.textContent = '开局';
+  }
+};
+
+/* ---------- 房间回合渲染 ---------- */
+
+UI._getViewerActorId = function () {
+  if (!UI.room || !UI.viewerSeatId) return null;
+  var seat = UI.room.seats.find(function (s) { return s.seatId === UI.viewerSeatId; });
+  return seat ? seat.actorId : null;
+};
+
+UI._isViewerSubmitted = function () {
+  var aid = UI._getViewerActorId();
+  return aid ? UI.room.turn.submittedActorIds.indexOf(aid) >= 0 : false;
+};
+
+UI.renderRoomChapter = function () {
+  var room = UI.room;
+  if (!room || !room.storySession) return;
+  var ss = room.storySession;
+  Story.state = ss;  // 让 Story 的便捷查询 API（getMeta / drawer 等）指向当前房间故事
+  var ch = ss.story.currentChapter;
+  var worldName = ss.world.name;
+  var year = ss.world.year;
+  var chapterIndex = ss.story.chapterIndex;
+  document.getElementById('tb-world').textContent = worldName;
+  document.getElementById('tb-scene').textContent = ch ? ch.title : '—';
+  document.getElementById('tb-chapter').textContent = chapterIndex;
+  document.getElementById('tb-year').textContent = Math.floor(year);
+  var phaseText = UI._isViewerSubmitted() ? '已落子' : '阅读';
+  var pp = document.getElementById('phase-pill');
+  pp.textContent = phaseText;
+  pp.className = 'phase-pill' + (UI._isViewerSubmitted() ? ' narrating' : '');
+
+  document.getElementById('chapter-title').textContent = ch ? ch.title : '—';
+  var timeTxt = ch && ch.timePassed ? (ch.timePassed.value + ' ' + ch.timePassed.unit + '后') : (chapterIndex === 1 ? '开局' : '数日后');
+  document.getElementById('chapter-time').textContent = worldName + ' · ' + Math.floor(year) + '年 · ' + timeTxt;
+  var text = ch ? ch.chapter : '';
+  var html = text.split(/\n+/).filter(Boolean).map(function (p) { return '<p>' + UI.esc(p) + '</p>'; }).join('');
+  document.getElementById('chapter-text').innerHTML = html;
+
+  UI.renderChapterEcho();
+  UI.renderChoices();
+  UI.renderLegacy();
+};
+
+UI.renderRoomChoices = function () {
+  var room = UI.room;
+  if (!room || !room.storySession) return;
+  var aid = UI._getViewerActorId();
+  var grid = document.getElementById('choice-grid');
+  if (!aid) { grid.innerHTML = ''; return; }
+
+  // 已提交 → 显示等待面板
+  if (UI._isViewerSubmitted()) {
+    document.getElementById('choice-section').style.display = 'none';
+    UI.showTurnWaiting(true);
+    UI._pollRoomTurn();
+    return;
+  }
+  UI.showTurnWaiting(false);
+  document.getElementById('choice-section').style.display = '';
+
+  var choices = Story.getChoicesForActor(room.storySession, aid);
+  grid.innerHTML = choices.map(function (c, i) {
+    var letter = ['A', 'B', 'C', 'D'][i] || (i + 1);
+    return '<div class="choice-card' + (UI.selectedChoiceId === c.id ? ' sel' : '') + '" data-cid="' + UI.esc(c.id) + '">' +
+      '<div class="choice-label">' + letter + '. ' + UI.esc(c.label) + '</div>' +
+      (c.hint ? '<div class="choice-hint">' + UI.esc(c.hint) + '</div>' : '') +
+      '</div>';
+  }).join('');
+  grid.querySelectorAll('.choice-card').forEach(function (el) {
+    el.addEventListener('click', function () {
+      UI.selectedChoiceId = el.getAttribute('data-cid');
+      UI.renderRoomChoices();
+      document.getElementById('btn-confirm').disabled = false;
+    });
+  });
+  if (!choices.length) document.getElementById('choice-section').style.display = 'none';
+};
+
+UI.confirmRoomTurn = async function (isCustom) {
+  var room = UI.room;
+  if (!room) return;
+  var aid = UI._getViewerActorId();
+  if (!aid) { UI.toast('未绑定角色'); return; }
+  var action;
+  if (isCustom) {
+    var text = document.getElementById('custom-text').value.trim();
+    if (!text) { UI.toast('请输入自定义行动'); return; }
+    action = { custom: { text: text } };
+  } else {
+    if (!UI.selectedChoiceId) { UI.toast('请选择 A / B / C'); return; }
+    action = { choiceId: UI.selectedChoiceId };
+  }
+  UI.selectedChoiceId = null;
+  document.getElementById('btn-confirm').disabled = true;
+  document.getElementById('custom-text').value = '';
+  try {
+    Room.transport.sendSync({ type: 'submitAction', roomId: room.roomId, seatId: UI.viewerSeatId, action: action });
+    // 热座模式：若还有未提交真人席位，弹出交接遮罩（避免泄露当前玩家选择）
+    if (UI._isHotseatMode()) {
+      var nextSeat = UI._findNextUnsubmittedHumanSeat(UI.viewerSeatId);
+      if (nextSeat) {
+        UI.showHotseatMask(nextSeat.seatId);
+        return;
+      }
+    }
+    UI.renderRoomChapter();  // 切换到"已落子"状态
+    UI._pollRoomTurn();
+  } catch (e) {
+    UI.toast('提交失败：' + e.message);
+    UI.renderRoomChapter();
+  }
+};
+
+UI.showTurnWaiting = function (on) {
+  var tw = document.getElementById('turn-waiting');
+  var cs = document.getElementById('choice-section');
+  tw.classList.toggle('show', on);
+  if (on) {
+    var resolving = UI.room && (UI.room.turn.phase === 'locked' || UI.room.turn.phase === 'resolving');
+    cs.style.display = 'none';
+    UI._renderSeatProgress();
+    var pp = document.getElementById('phase-pill');
+    pp.textContent = resolving ? '天机演算' : '已落子';
+    pp.className = 'phase-pill narrating';
+    document.getElementById('tw-text').textContent = resolving ? '正在生成下一章' : '已落子';
+    document.getElementById('tw-sub').textContent = resolving
+      ? '所有修士均已落子；网络异常时会自动切换到本地叙事。'
+      : '等待其他修士……';
+    // 撤回按钮：仅在 collecting 阶段（未锁定）时可用
+    var canCancel = UI.room && UI.room.turn.phase === 'collecting';
+    document.getElementById('btn-cancel-action').style.display = canCancel ? '' : 'none';
+  } else {
+    cs.style.display = '';
+    document.getElementById('computing').style.display = 'none';
+    document.getElementById('btn-cancel-action').style.display = 'none';
+  }
+};
+
+/** 撤回已提交的行动（仅 collecting 阶段可用） */
+UI.cancelRoomAction = function () {
+  if (!UI.room) return;
+  try {
+    Room.transport.sendSync({ type: 'cancelAction', roomId: UI.room.roomId, seatId: UI.viewerSeatId });
+    UI.selectedChoiceId = null;
+    document.getElementById('btn-confirm').disabled = true;
+    UI._roomPolling = false;  // 停止轮询
+    UI.showTurnWaiting(false);
+    UI.renderRoomChapter();
+  } catch (e) {
+    UI.toast(e.message);
+  }
+};
+
+UI._renderSeatProgress = function () {
+  var room = UI.room;
+  if (!room) return;
+  var box = document.getElementById('seat-progress');
+  var names = ['一', '二', '三', '四'];
+  box.innerHTML = room.seats.map(function (s, i) {
+    if (s.kind === 'empty') return '';
+    var submitted = s.actorId && room.turn.submittedActorIds.indexOf(s.actorId) >= 0;
+    var cls = submitted ? 'sp-chip done' : (s.kind === 'bot' ? 'sp-chip thinking' : 'sp-chip');
+    var label = s.actorSetup ? s.actorSetup.name : (s.displayName || names[i]);
+    var status = submitted ? '✓' : (s.kind === 'bot' ? '思量中' : '待落子');
+    return '<span class="' + cls + '">' + UI.esc(label) + ' ' + status + '</span>';
+  }).filter(Boolean).join('');
+};
+
+/** 轮询房间回合是否已结算（新回合开启） */
+UI._pollRoomTurn = function () {
+  if (UI._roomPolling) return;
+  UI._roomPolling = true;
+  var roundBefore = UI._lastRoomRound;
+  function onResolved() {
+    UI._lastRoomRound = UI.room.turn.round;
+    UI._roomPolling = false;
+    UI._renderSeatProgress();
+    // 新回合开启后自动存档（防刷新丢失进度）
+    try { Room.RoomSave.save(UI.room.roomId); } catch (e) {}
+    // 热座模式：新回合开启，若第一个未提交真人席位 ≠ 当前观察者，弹出交接遮罩
+    if (UI._isHotseatMode()) {
+      var firstHuman = UI._findFirstUnsubmittedHumanSeat();
+      if (firstHuman && firstHuman.seatId !== UI.viewerSeatId) {
+        UI.showHotseatMask(firstHuman.seatId);
+        return;
+      }
+    }
+    UI.renderRoomChapter();
+  }
+  function onFailed() {
+    var message = UI.room && UI.room.turn.lastError ? UI.room.turn.lastError : '未知错误';
+    UI._roomPolling = false;
+    UI.selectedChoiceId = null;
+    document.getElementById('btn-confirm').disabled = true;
+    UI.showTurnWaiting(false);
+    UI.renderRoomChapter();
+    UI.toast('本轮结算失败，已解除锁定，请重新选择：' + message);
+  }
+  function check() {
+    if (!UI.room) { UI._roomPolling = false; return; }
+    var p = Room.transport.awaitPending(UI.room.roomId);
+    if (p) {
+      p.then(function () {
+        if (UI.room && UI.room.turn.round > roundBefore) {
+          onResolved();
+        } else if (UI.room && UI.room.turn.lastError) {
+          onFailed();
+        } else if (UI.room) {
+          setTimeout(check, 300);
+        }
+      });
+    } else if (UI.room.turn.round > roundBefore) {
+      onResolved();
+    } else {
+      UI._renderSeatProgress();
+      setTimeout(check, 500);
+    }
+  }
+  check();
+};
+
+/* ---------- 热座交接 ---------- */
+
+UI._isHotseatMode = function () {
+  return !!(UI.room && UI.room.mode === 'local-hotseat');
+};
+
+/** 从指定席位之后循环查找下一个未提交的真人席位（不含当前） */
+UI._findNextUnsubmittedHumanSeat = function (fromSeatId) {
+  if (!UI.room) return null;
+  var seats = UI.room.seats;
+  var idx = seats.findIndex(function (s) { return s.seatId === fromSeatId; });
+  if (idx < 0) return null;
+  for (var off = 1; off <= seats.length; off++) {
+    var s = seats[(idx + off) % seats.length];
+    if (s.kind === 'human' && s.actorId && UI.room.turn.submittedActorIds.indexOf(s.actorId) < 0) return s;
+  }
+  return null;
+};
+
+/** 查找第一个未提交的真人席位（用于新回合开始） */
+UI._findFirstUnsubmittedHumanSeat = function () {
+  if (!UI.room) return null;
+  return UI.room.seats.find(function (s) {
+    return s.kind === 'human' && s.actorId && UI.room.turn.submittedActorIds.indexOf(s.actorId) < 0;
+  }) || null;
+};
+
+UI.showHotseatMask = function (nextSeatId) {
+  UI._hotseatNextSeatId = nextSeatId;
+  var seat = UI.room.seats.find(function (s) { return s.seatId === nextSeatId; });
+  var name = seat ? (seat.actorSetup ? seat.actorSetup.name : seat.displayName) : '—';
+  document.getElementById('hm-actor').textContent = name;
+  document.getElementById('hotseat-mask').classList.add('show');
+  // 切换观察者前先清空已落子状态，避免泄露上一玩家选择
+  UI.selectedChoiceId = null;
+  UI.showTurnWaiting(false);
+  document.getElementById('choice-section').style.display = 'none';
+};
+
+UI.enterHotseat = function () {
+  document.getElementById('hotseat-mask').classList.remove('show');
+  if (!UI._hotseatNextSeatId) return;
+  UI.viewerSeatId = UI._hotseatNextSeatId;
+  UI._hotseatNextSeatId = null;
+  UI.selectedChoiceId = null;
+  document.getElementById('btn-confirm').disabled = true;
+  UI.renderRoomChapter();
+};
+
+UI.hideHotseatMask = function () {
+  document.getElementById('hotseat-mask').classList.remove('show');
+  UI._hotseatNextSeatId = null;
+};
+
+/* ---------- 屏幕切换 ---------- */
+UI.switchScreen = function (name) {
+  document.querySelectorAll('.screen').forEach(function (s) { s.classList.remove('active'); });
+  document.getElementById('screen-' + name).classList.add('active');
+};
+
+/* ---------- 背景星点 ---------- */
+UI.drawBg = function () {
+  const c = document.getElementById('bg-canvas');
+  if (!c.getContext) return;
+  let ctx;
+  try { ctx = c.getContext('2d'); } catch (e) { return; }
+  if (!ctx) return;
+  c.width = window.innerWidth; c.height = window.innerHeight;
+  const stars = [];
+  for (let i = 0; i < 80; i++) stars.push({ x: Math.random() * c.width, y: Math.random() * c.height, r: Math.random() * 1.2, a: Math.random() });
+  let t = 0;
+  function loop() {
+    ctx.clearRect(0, 0, c.width, c.height);
+    t += 0.01;
+    stars.forEach(function (s) {
+      s.a = 0.3 + 0.5 * Math.abs(Math.sin(t + s.x));
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(200,164,92,' + s.a * 0.4 + ')'; ctx.fill();
+    });
+    requestAnimationFrame(loop);
+  }
+  loop();
+  window.addEventListener('resize', function () { c.width = window.innerWidth; c.height = window.innerHeight; });
+};
+
+/* ---------- 绑定事件 ---------- */
+UI.init = function () {
+  UI.loadSettings();
+  UI.drawBg();
+  Story.onAIStatus(UI.renderAIStatus);
+  UI.syncAI();
+  // 有存档则显示继续入口（优先 V3.1 房间存档，回退 V3 单人存档）
+  if (Room.RoomSave.hasSave() || Story.hasSave()) {
+    document.getElementById('btn-continue').style.display = '';
+  }
+
+  document.getElementById('btn-random-seed').addEventListener('click', function () {
+    document.getElementById('seed-input').value = 'V3-' + Math.floor(Math.random() * 99999);
+  });
+  document.getElementById('btn-roll').addEventListener('click', function () { UI.doRoll(); });
+  document.getElementById('btn-reroll').addEventListener('click', function () { UI.doRoll(); });
+  // V3.1 主入口：创建房间入局
+  document.getElementById('btn-create-room').addEventListener('click', UI.createRoom);
+  // V3 单人兼容入口（直接调用 Story.startGame，不经房间层）
+  var quickSolo = document.getElementById('btn-quick-solo');
+  if (quickSolo) {
+    quickSolo.style.display = '';
+    quickSolo.addEventListener('click', UI.startGame);
+  }
+  document.getElementById('btn-continue').addEventListener('click', UI.continueGame);
+
+  // V3.1 房间存档
+  document.getElementById('btn-save').addEventListener('click', UI.saveRoom);
+
+  // 房间大厅事件
+  document.getElementById('btn-lobby-start').addEventListener('click', UI.startRoom);
+  document.getElementById('btn-lobby-back').addEventListener('click', function () {
+    UI.room = null;
+    UI.viewerSeatId = null;
+    UI.switchScreen('intro');
+  });
+  var lobbySettings = document.getElementById('btn-lobby-settings');
+  if (lobbySettings) lobbySettings.addEventListener('click', UI.openSettings);
+
+  // 添加机器人弹窗
+  document.getElementById('bot-confirm').addEventListener('click', UI.confirmAddBot);
+  document.getElementById('bot-cancel').addEventListener('click', function () { document.getElementById('bot-modal').classList.remove('show'); });
+
+  // 立命弹窗
+  document.getElementById('ac-confirm').addEventListener('click', UI.confirmActorSetup);
+  document.getElementById('ac-cancel').addEventListener('click', function () { document.getElementById('actor-modal').classList.remove('show'); });
+
+  // 热座交接遮罩
+  document.getElementById('hm-enter').addEventListener('click', UI.enterHotseat);
+
+  document.getElementById('btn-confirm').addEventListener('click', function () { UI.confirmTurn(false); });
+  document.getElementById('btn-custom').addEventListener('click', function () { UI.confirmTurn(true); });
+  document.getElementById('btn-cancel-action').addEventListener('click', UI.cancelRoomAction);
+  document.getElementById('btn-regen').addEventListener('click', UI.regenChapter);
+  document.getElementById('btn-archive').addEventListener('click', UI.openDrawer);
+  document.getElementById('btn-settings').addEventListener('click', UI.openSettings);
+  document.getElementById('drawer-close').addEventListener('click', UI.closeDrawer);
+  document.getElementById('drawer-overlay').addEventListener('click', UI.closeDrawer);
+  document.querySelectorAll('.drawer-tab').forEach(function (t) {
+    t.addEventListener('click', function () {
+      document.querySelectorAll('.drawer-tab').forEach(function (x) { x.classList.remove('active'); });
+      t.classList.add('active');
+      UI.drawerTab = t.getAttribute('data-tab');
+      UI.renderDrawer();
+    });
+  });
+  document.getElementById('set-cancel').addEventListener('click', function () { document.getElementById('set-modal').classList.remove('show'); });
+  document.getElementById('set-test').addEventListener('click', UI.testAIConnection);
+  document.getElementById('set-save').addEventListener('click', UI.saveSettings);
+  document.getElementById('ai-status').addEventListener('click', UI.openSettings);
+
+  // 预填一个种子方便快速体验
+  document.getElementById('seed-input').value = '轮回塔海-7';
+};
+
+UI.init();
+</script>
+</body>
+</html>

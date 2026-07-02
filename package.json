@@ -1,0 +1,18 @@
+{
+  "name": "xiuxianju-v3",
+  "version": "3.2.0",
+  "description": "多人互动跑团文字小说：本地裁决优先、AI 仅叙事的稳定引擎（V3.2）",
+  "private": true,
+  "scripts": {
+    "test": "npm run test:core && npm run test:room && npm run test:regression && npm run test:ai && npm run test:dom && npm run test:v32",
+    "test:core": "node test-acceptance.js && node test-v21.js && node test-v3.js",
+    "test:room": "node test-v31.js",
+    "test:regression": "node test-regressions.js",
+    "test:ai": "node test-ai-integration.js",
+    "test:dom": "node test-browser-load.js && node test-v3-dom.js",
+    "test:v32": "node test-v32-intent.js && node test-v32-resolver.js && node test-v32-choice.js && node test-v32-provider.js"
+  },
+  "dependencies": {
+    "jsdom": "^25.0.1"
+  }
+}
