@@ -189,7 +189,7 @@ Story.registerAIProvider({
   narrate: async function () { throw new Error('bad json'); },
 }, { provider: 'throw', model: 'throw-m' });
 const s6b = await Story.startGame('API-BADJSON-2', playerSetup);
-ok('Provider 抛错：开局停在 awaiting_narration', Story.getTurnPhase(s6b) === 'awaiting_narration', Story.getTurnPhase(s6b));
+ok('Provider 抛错：开局停在 narration_failed', Story.getTurnPhase(s6b) === 'narration_failed', Story.getTurnPhase(s6b));
 ok('Provider 抛错：无 currentChapter（V3.3 无离线兜底）', !s6b.story.currentChapter);
 ok('Provider 抛错：pendingResolution 记录错误', !!Story.getPendingResolution(s6b) && !!Story.getPendingResolution(s6b).lastNarrationError);
 

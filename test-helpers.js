@@ -83,9 +83,66 @@ function setupMockAI(Story, opts) {
   return p;
 }
 
+/** 变体章节文本（用于长线质量测试，避免 Mock 返回完全相同文本） */
+var VARIANT_CHAPTERS = [
+  '雨落长街，剑气未散。众人立于檐下，听远处更鼓声声，心中各有计较。',
+  '风起古道，尘沙扑面。韩照野勒马回望，眼角掠过一丝不易察觉的锐光。',
+  '客栈后院，柴门半掩。沈青萝蹲身拾起一枚沾血的铜钱，指尖微微发颤。',
+  '夜色如墨，边城更鼓敲过三响。顾长风独自立在城墙残垣上，手中阵盘轻颤。',
+  '翌日清晨，薄雾未散。陆知微推开窗扉，院中石桌上多了一封未署名的信笺。',
+  '商队远去，辙痕在黄沙中渐渐模糊，只余几缕烟尘在风中盘旋不散。',
+  '密室深处，烛火摇曳。残剑在黑暗中发出低微的嗡鸣，似在回应某种古老的呼唤。',
+  '山道崎岖，松涛阵阵。一行人沿着石阶拾级而上，雾中隐约可见一座破败的山门。',
+  '暴雨倾盆，雷声滚滚。众人躲进路边废弃的庙宇，却见供桌上放着三盏未灭的油灯。',
+  '晨光熹微，露水沾衣。陆知微盘膝坐于石上，丹田中一缕气机缓缓流转，渐入佳境。',
+  '集市喧嚣，人来人往。一个戴着斗笠的身影从人群中穿过，腰间佩剑与残剑隐隐共鸣。',
+  '夜深人静，星河低垂。众人围坐篝火旁，各怀心事，只有柴火噼啪声打破寂静。',
+];
+
+var VARIANT_TITLES = [
+  '天机演章', '古道尘烟', '后院惊变', '边城残垣', '无名信笺',
+  '商队远影', '密室低语', '山门残照', '破庙孤灯', '晨修悟道',
+  '斗笠过客', '星河夜话',
+];
+
+/**
+ * 创建变体 Mock Provider（每章返回不同文本，用于长线质量测试）
+ */
+function createVariantMockProvider(opts) {
+  opts = opts || {};
+  var calls = 0;
+  return {
+    narrate: async function (ctx) {
+      calls++;
+      var idx = (calls - 1) % VARIANT_CHAPTERS.length;
+      var payload = {
+        title: VARIANT_TITLES[idx] + '·第' + calls + '回',
+        chapter: VARIANT_CHAPTERS[idx] + '这一夜变故横生，前路愈发难以预料。众人各怀心思，却都未肯先行退去。更鼓再响，而暗流方才涌动。',
+        dialogues: [],
+        endingImage: '',
+      };
+      return JSON.stringify(payload);
+    },
+    calls: function () { return calls; },
+    reset: function () { calls = 0; },
+  };
+}
+
+/**
+ * 一行启用变体 mock AI（每章不同文本）
+ */
+function setupVariantMockAI(Story) {
+  Story.setAIEnabled(true);
+  var p = createVariantMockProvider();
+  Story.registerAIProvider(p, { provider: 'mock-variant', model: 'mock-variant' });
+  return p;
+}
+
 module.exports = {
   DEFAULT_CHAPTER: DEFAULT_CHAPTER,
   DEFAULT_TITLE: DEFAULT_TITLE,
   createMockProvider: createMockProvider,
   setupMockAI: setupMockAI,
+  createVariantMockProvider: createVariantMockProvider,
+  setupVariantMockAI: setupVariantMockAI,
 };

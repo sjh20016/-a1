@@ -291,7 +291,7 @@ input,textarea,select{font-family:inherit;color:var(--text)}
   <div class="dice-grid" id="origin-dice"></div>
 
   <div class="setup-card" id="setup-card" style="display:none">
-    <h3>立命 · 你的角色</h3>
+    <h3>立命 · 你的角色 <button class="btn ghost sm" id="btn-random-setup" style="margin-left:12px">随机立命</button></h3>
     <div class="form-row">
       <label>名字</label>
       <input id="su-name" type="text" value="陆知微">
@@ -624,6 +624,17 @@ UI.doRoll = function (seed) {
   document.getElementById('intro-cta').style.display = '';
 };
 
+/** 骰子阶段随机立命 */
+UI.randomizeSetup = function () {
+  var seed = document.getElementById('seed-input').value.trim() || ('V3-' + Math.floor(Math.random() * 99999));
+  var setup = Story.randomizeCharacterSetup(seed + '-setup');
+  document.getElementById('su-name').value = setup.name;
+  document.getElementById('su-identity').value = setup.identity;
+  document.getElementById('su-dao').value = setup.daoPath;
+  document.getElementById('su-wish').value = setup.publicWish;
+  document.getElementById('su-fate').value = setup.hiddenFate;
+};
+
 UI.startGame = async function () {
   // The legacy quick-solo path must not inherit a room left by a previous
   // lobby visit; renderChapter dispatches by this flag.
@@ -782,7 +793,7 @@ UI.renderNarrationBlocked = function () {
   var box = document.getElementById('narration-blocked');
   if (!box) return;
   var phase = Story.getTurnPhase();
-  if (phase !== 'awaiting_narration') {
+  if (phase !== 'awaiting_narration' && phase !== 'narration_failed') {
     box.style.display = 'none';
     document.getElementById('choice-section').style.display = '';
     document.getElementById('computing').style.display = 'none';
@@ -2032,6 +2043,7 @@ UI.init = function () {
   });
   document.getElementById('btn-roll').addEventListener('click', function () { UI.doRoll(); });
   document.getElementById('btn-reroll').addEventListener('click', function () { UI.doRoll(); });
+  document.getElementById('btn-random-setup').addEventListener('click', function () { UI.randomizeSetup(); });
   // V3.1 主入口：创建房间入局
   document.getElementById('btn-create-room').addEventListener('click', UI.createRoom);
   // V3 单人兼容入口（直接调用 Story.startGame，不经房间层）

@@ -253,11 +253,11 @@ const Room = {};
           var actor = storyState.actors.find(function (a) { return a.seatId === s.seatId; });
           if (actor) s.actorId = actor.id;
         });
-        // V3.3：开局可能因 AI 失败停在 awaiting_narration
+        // V3.3.1：开局可能因 AI 失败停在 narration_failed（V3.3 为 awaiting_narration）
         var openPhase = Story.getTurnPhase(storyState);
-        if (openPhase === 'awaiting_narration') {
-          room.status = 'awaiting_narration';
-          room.turn.phase = 'awaiting_narration';
+        if (openPhase === 'awaiting_narration' || openPhase === 'narration_failed') {
+          room.status = 'narration_failed';
+          room.turn.phase = 'narration_failed';
           var pr0 = Story.getPendingResolution(storyState);
           var err0 = pr0 && pr0.lastNarrationError ? pr0.lastNarrationError : null;
           room.turn.lastError = err0 ? ('天机未应：' + (err0.code || 'UNKNOWN') + ' — ' + (err0.message || '')) : '天机未应';
@@ -560,12 +560,12 @@ const Room = {};
     try {
       var actions = Object.assign({}, room.turn.actionsByActorId);
       await Story.resolveTurn(room.storySession, actions);
-      // V3.3：resolveTurn 成功返回后，根据 turnPhase 判断结果
+      // V3.3.1：resolveTurn 成功返回后，根据 turnPhase 判断结果
       var phase = Story.getTurnPhase(room.storySession);
-      if (phase === 'awaiting_narration') {
-        // AI 失败：停在 awaiting_narration，不清空提交状态，全员保持锁定
-        room.status = 'awaiting_narration';
-        room.turn.phase = 'awaiting_narration';
+      if (phase === 'awaiting_narration' || phase === 'narration_failed') {
+        // AI 失败：停在 narration_failed，不清空提交状态，全员保持锁定
+        room.status = 'narration_failed';
+        room.turn.phase = 'narration_failed';
         var pr = Story.getPendingResolution(room.storySession);
         var err = pr && pr.lastNarrationError ? pr.lastNarrationError : null;
         room.turn.lastError = err ? ('天机未应：' + (err.code || 'UNKNOWN') + ' — ' + (err.message || '')) : '天机未应';
@@ -591,11 +591,11 @@ const Room = {};
     }
   }
 
-  /** V3.3 重试叙事：仅在 awaiting_narration 可调用，复用同一 pendingResolution */
+  /** V3.3.1 重试叙事：在 narration_failed 可调用，复用同一 pendingResolution */
   Room.coordinator.retryNarration = async function (roomId, options) {
     var room = _rooms.get(roomId);
     if (!room) throw new Error('房间不存在');
-    if (room.status !== 'awaiting_narration') throw new Error('当前不在待叙事状态');
+    if (room.status !== 'narration_failed' && room.status !== 'awaiting_narration') throw new Error('当前不在待叙事状态');
     room._pending = _retryNarration(room, options || {});
     return room._pending;
   };
@@ -605,8 +605,8 @@ const Room = {};
     try {
       await Story.retryNarration(room.storySession, options);
       var phase = Story.getTurnPhase(room.storySession);
-      if (phase === 'awaiting_narration') {
-        // 仍失败：保持 awaiting_narration
+      if (phase === 'narration_failed' || phase === 'awaiting_narration') {
+        // 仍失败：保持 narration_failed
         var pr = Story.getPendingResolution(room.storySession);
         var err = pr && pr.lastNarrationError ? pr.lastNarrationError : null;
         room.turn.lastError = err ? ('天机未应：' + (err.code || 'UNKNOWN') + ' — ' + (err.message || '')) : '天机未应';

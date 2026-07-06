@@ -181,7 +181,7 @@ async function main() {
   const timeoutChoices = Story.getChoicesForActor(timeoutRoom.storySession, timeoutRoom.seats[0].actorId);
   Room.coordinator.submitAction(timeoutRoom.roomId, 'seat_0', { choiceId: timeoutChoices[0].id });
   await Room.coordinator.awaitPending(timeoutRoom.roomId);
-  check('V3.3 AI 超时停在 awaiting_narration（不回退离线）', timeoutRoom.status === 'awaiting_narration', timeoutRoom.status);
+  check('V3.3 AI 超时停在 narration_failed（不回退离线）', timeoutRoom.status === 'narration_failed', timeoutRoom.status);
   check('V3.3 AI 超时回合不推进', timeoutRoom.turn.round === timeoutRound, 'round=' + timeoutRoom.turn.round);
   Story.ai.timeoutMs = originalTimeout;
   // 恢复 mock AI 后重试叙事，验证可恢复
