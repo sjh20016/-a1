@@ -294,6 +294,16 @@ Story.createEmptyState = function () {
       // V3.3 Narration Transaction：回合状态机 + 待提交裁决包
       turnPhase: 'collecting',     // collecting|locked|resolving|awaiting_narration|published
       pendingResolution: null,     // {turnId,envelope,actionsByActorId,botActions,sceneBefore,chapterIndexBefore,createdAt,retryCount,lastNarrationError}
+      // V3.3.2 Director：卷纲导演系统
+      director: {
+        phase: 'inactive',         // inactive | voting | active | completed
+        candidates: [],
+        votesByActorId: {},
+        activeArc: null,           // { arcId, recipeId, family, title, publicPitch, tags, status, startedAtChapter, currentBeatIndex, beats, pressureClocks, divergenceLog, revealLog }
+        dormantArcs: [],
+        completedArcs: [],
+        lastDirectorEvent: null,
+      },
       // V3 兼容字段（仅作镜像，不承担真实逻辑）
       pendingChoices: {},
       aiPendingChoices: {},
@@ -352,6 +362,11 @@ Story.Migration.migrateToV32 = function (s) {
   // V3.3 Narration Transaction 字段
   if (!st.turnPhase) st.turnPhase = 'collecting';
   if (!st.pendingResolution) st.pendingResolution = null;
+  // V3.3.2 Director
+  if (!st.director) st.director = {
+    phase: 'inactive', candidates: [], votesByActorId: {},
+    activeArc: null, dormantArcs: [], completedArcs: [], lastDirectorEvent: null,
+  };
   // currentChapter 补 provenance
   if (st.currentChapter && !st.currentChapter.provenance) {
     st.currentChapter.provenance = 'legacy';
@@ -591,11 +606,11 @@ Story.createPresetCompanions = function () {
 
 Story.createSession = async function (config) {
   config = config || {};
-  const seed = config.seed || ('BLACKWIND-' + Math.floor(Math.random() * 9999));
-  const roll = Story.rollOrigin(seed);
-  const bible = config.worldConfig || Story.buildWorldBible(roll);
+  var seed = config.seed || ('BLACKWIND-' + Math.floor(Math.random() * 9999));
+  var roll = Story.rollOrigin(seed);
+  var bible = config.worldConfig || Story.buildWorldBible(roll);
 
-  const state = Story.createEmptyState();
+  var state = Story.createEmptyState();
   Story.state = state;
   state.world.seed = seed;
   state.world.name = bible.worldName;
@@ -609,14 +624,17 @@ Story.createSession = async function (config) {
   Story._bindStateRng(state, Story.createRng(seed, 'story'));
 
   state.actors = (config.actors || []).map(function (setup, i) {
-    const a = Story.createActor(setup, state);
+    var a = Story.createActor(setup, state);
     if (!a.seatId) a.seatId = setup.seatId || ('seat_' + i);
     return a;
   });
 
   if (config.narrativePace) state.settings.narrativePace = config.narrativePace;
 
-  await Story._generateOpening(state);
+  // V3.3.2：若指定 skipOpening，跳过开局生成（等待 Director 投票后激活）
+  if (!config.skipOpening) {
+    await Story._generateOpening(state);
+  }
   return state;
 };
 
@@ -703,6 +721,10 @@ Story._commitPendingResolution = function (state, narration, isOpening) {
     });
     s._pendingAgentArcDeltas = null;
   }
+  // V3.3.2：应用 DirectorPlan（AI 失败时不提交，此处才写入 activeArc）
+  if (pr.directorPlan) {
+    Story.Director.applyPlan(state, pr.directorPlan);
+  }
   // 2. 场景演化（开局：sceneBefore 已是开局场景，沿用；回合：composeNext）
   if (isOpening) {
     // 开局场景在 _generateOpening 中已创建，这里不覆盖
@@ -736,6 +758,7 @@ Story._commitPendingResolution = function (state, narration, isOpening) {
       providerErrorCode: state.api.lastErrorCode,
       retryCount: pr.retryCount,
     },
+    directorPlan: pr.directorPlan ? { arcId: pr.directorPlan.arcId, beatId: pr.directorPlan.beatId, result: pr.directorPlan.result } : null,
     createdAt: Date.now(),
   };
   state.ledger.turnRecords.push(turnRecord);
@@ -873,7 +896,16 @@ Story.resolveTurn = async function (storyState, actionsByActorId) {
     throw e;
   }
 
-  // 5. awaiting_narration：世界状态冻结，存 pendingResolution
+  // 5. V3.3.2 Director.evaluate：评估卷纲推进（纯计算，不应用）
+  var directorPlan = null;
+  try {
+    directorPlan = Story.Director.evaluate(state, envelope);
+  } catch (e) {
+    // Director 失败不应阻塞回合，仅记录日志
+    if (state.settings && state.settings.developerMode) console.error('Director.evaluate 失败：', e.message);
+  }
+
+  // 6. awaiting_narration：世界状态冻结，存 pendingResolution
   Story._setTurnPhase(state, 'awaiting_narration');
   const turnId = 'turn_' + String(chapterIndexBefore + 1).padStart(4, '0');
   state.story.pendingResolution = {
@@ -886,6 +918,7 @@ Story.resolveTurn = async function (storyState, actionsByActorId) {
     createdAt: Date.now(),
     retryCount: 0,
     lastNarrationError: null,
+    directorPlan: directorPlan,
   };
 
   // 6. 调 AI 叙事
@@ -1339,6 +1372,790 @@ Story.AssetRegistry = {
     return state.assets.filter(function (a) { return a.locationId === locId; });
   },
   all: function (state) { return (state && state.assets) || []; },
+};
+
+/* ============================================================
+ * V3.3.2 Director：卷纲导演系统
+ * 职责：候选剧情生成 → 投票 → 激活 → Beat 推进/偏转/拖延/打碎
+ * 不直接修改状态，通过 DirectorPlan 写入 pendingResolution
+ * ============================================================ */
+
+/* ---------- ArcRecipe 配方库（4 条，每局随机抽 3 条） ---------- */
+Story.DirectorRecipes = {
+  relic_identity: {
+    id: 'relic_identity',
+    family: 'mystery',
+    title: '残剑照旧城',
+    publicPitch: '一柄残剑在雨夜认错了主人，而追逐它的人已在路上。',
+    tags: ['遗物', '身份', '前世', '剑修'],
+    weightRules: {
+      heavenlyLaw: { '遗物共鸣': 4, '因果具现': 3 },
+      storyGravity: { '剑修': 3, '遗物': 3 },
+      daoPath: { '剑修': 3 },
+    },
+    openingSeed: {
+      addEntities: [
+        { id: 'ent_residual_sword', name: '残剑', kind: 'relic', affordances: ['use_relic', 'investigate', 'observe'] },
+        { id: 'ent_sword_echo', name: '剑中残响', kind: 'clue', affordances: ['investigate', 'observe'] },
+      ],
+      addThreads: [
+        { threadId: 'thread_old_sword', type: 'mystery', title: '残剑低语', stage: 1, maxStage: 4, status: 'active', urgency: 2, visibility: 'public' },
+        { threadId: 'thread_sword_pursuer', type: 'threat', title: '追剑之人', stage: 1, maxStage: 3, status: 'dormant', urgency: 1, visibility: 'hidden' },
+      ],
+      addClock: {
+        clockId: 'clock_sword_pursuer',
+        label: '追剑者逼近',
+        current: 0, max: 4,
+        onFull: 'divert',
+      },
+    },
+    beats: [
+      {
+        beatId: 'relic_01', title: '剑鸣之夜',
+        dramaticGoal: '让残剑的异常真正进入玩家视野。',
+        advanceSignals: { categories: ['investigate', 'use_relic'], targets: ['ent_residual_sword', 'thread_old_sword'] },
+        bendSignals: { categories: ['social', 'observe'], targets: ['ent_innkeeper', 'inn_redsand'] },
+        stallSignals: { categories: ['rest', 'wait', 'cultivate'] },
+        shatterKeywords: ['毁掉残剑', '丢弃残剑', '卖掉残剑', '交出残剑'],
+        allowedReveals: ['残剑中有不属于此世的剑意', '残剑曾在某个雨夜认错主人'],
+        forbiddenReveals: ['剑灵的真实身份', '残剑的完整来历', '追剑者的真实身份'],
+        nextOnAdvance: 'relic_02', nextOnBend: 'relic_02', nextOnStall: 'relic_01', nextOnShatter: 'relic_01_shattered',
+      },
+      {
+        beatId: 'relic_02', title: '追剑之人',
+        dramaticGoal: '残剑的持有者不是唯一追逐它的人。',
+        advanceSignals: { categories: ['investigate', 'social'], targets: ['thread_sword_pursuer', 'ent_sword_echo'] },
+        bendSignals: { categories: ['negotiate', 'travel', 'flee'], targets: ['road_broken_flow'] },
+        stallSignals: { categories: ['rest', 'wait', 'cultivate'] },
+        shatterKeywords: ['与追剑者结盟', '将残剑交给追剑者'],
+        allowedReveals: ['追剑者并非敌人', '残剑不止一把'],
+        forbiddenReveals: ['追剑者的真实身份', '残剑的最终形态'],
+        nextOnAdvance: 'relic_03', nextOnBend: 'relic_03', nextOnStall: 'relic_02', nextOnShatter: 'relic_02_shattered',
+      },
+      {
+        beatId: 'relic_03', title: '残剑择主',
+        dramaticGoal: '残剑终于做出选择，或永远沉默。',
+        advanceSignals: { categories: ['use_relic', 'cultivate'], targets: ['ent_residual_sword'] },
+        bendSignals: { categories: ['social', 'negotiate'], targets: ['thread_sword_pursuer'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['拒绝残剑', '封印残剑', '永不再用'],
+        allowedReveals: ['残剑选择了你', '剑灵的记忆碎片'],
+        forbiddenReveals: ['剑灵的完整身世', '残剑的终极力量'],
+        nextOnAdvance: null, nextOnBend: null, nextOnStall: null, nextOnShatter: null,
+      },
+    ],
+  },
+
+  trade_contract: {
+    id: 'trade_contract',
+    family: 'intrigue',
+    title: '商路与血契',
+    publicPitch: '一封密信牵出商会、宗门与一笔不能违背的契约。',
+    tags: ['商会', '契约', '交易', '势力博弈'],
+    weightRules: {
+      heavenlyLaw: { '契约具现': 4 },
+      storyGravity: { '经商': 4, '势力': 2 },
+      daoPath: { '丹道': 1, '游侠': 2 },
+    },
+    openingSeed: {
+      addEntities: [
+        { id: 'ent_trade_letter', name: '半封商会密信', kind: 'clue', affordances: ['investigate', 'observe'] },
+        { id: 'ent_caravan_ledger', name: '商会账册残页', kind: 'clue', affordances: ['investigate'] },
+      ],
+      addThreads: [
+        { threadId: 'thread_trade_letter', type: 'mystery', title: '商会密信失踪', stage: 1, maxStage: 4, status: 'active', urgency: 2, visibility: 'public' },
+        { threadId: 'thread_contract_secret', type: 'intrigue', title: '血契真相', stage: 1, maxStage: 3, status: 'dormant', urgency: 1, visibility: 'hidden' },
+      ],
+      addClock: {
+        clockId: 'clock_caravan_departure',
+        label: '商队离城',
+        current: 0, max: 3,
+        onFull: 'divert',
+      },
+    },
+    beats: [
+      {
+        beatId: 'trade_01', title: '被截断的密信',
+        dramaticGoal: '让商会的异常真正进入玩家视野。',
+        advanceSignals: { categories: ['investigate'], targets: ['ent_trade_letter', 'thread_trade_letter'] },
+        bendSignals: { categories: ['social', 'negotiate'], targets: ['ent_innkeeper', 'ent_trade_caravan'] },
+        stallSignals: { categories: ['rest', 'wait', 'cultivate'] },
+        shatterKeywords: ['烧掉密信', '撕毁密信', '卖掉密信', '交给商会'],
+        allowedReveals: ['密信不是普通账目', '商会有人试图掩盖某件事'],
+        forbiddenReveals: ['幕后主使真实身份', '最终契约内容', '完整黑账'],
+        nextOnAdvance: 'trade_02', nextOnBend: 'trade_02', nextOnStall: 'trade_01', nextOnShatter: 'trade_01_shattered',
+      },
+      {
+        beatId: 'trade_02', title: '契约的代价',
+        dramaticGoal: '发现契约不是交易，而是束缚。',
+        advanceSignals: { categories: ['investigate', 'social'], targets: ['thread_contract_secret', 'ent_caravan_ledger'] },
+        bendSignals: { categories: ['negotiate', 'deceive', 'travel'], targets: ['road_broken_flow'] },
+        stallSignals: { categories: ['rest', 'wait', 'cultivate'] },
+        shatterKeywords: ['公开契约', '撕毁契约', '向宗门告发'],
+        allowedReveals: ['契约并非自愿签署', '商会中有人被困'],
+        forbiddenReveals: ['契约的最终受益人', '背后宗门的完整计划'],
+        nextOnAdvance: 'trade_03', nextOnBend: 'trade_03', nextOnStall: 'trade_02', nextOnShatter: 'trade_02_shattered',
+      },
+      {
+        beatId: 'trade_03', title: '商路抉择',
+        dramaticGoal: '选择站队、撕毁、利用或背叛契约。',
+        advanceSignals: { categories: ['social', 'negotiate'], targets: ['thread_contract_secret'] },
+        bendSignals: { categories: ['travel', 'flee', 'battle'], targets: ['road_broken_flow'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['摧毁商会', '背叛契约', '永不再回'],
+        allowedReveals: ['契约的最终代价', '有人因此获救'],
+        forbiddenReveals: ['契约的终极秘密'],
+        nextOnAdvance: null, nextOnBend: null, nextOnStall: null, nextOnShatter: null,
+      },
+    ],
+  },
+
+  sect_trial: {
+    id: 'sect_trial',
+    family: 'conflict',
+    title: '宗门试炼',
+    publicPitch: '边城宗门设下三道试炼，通过者可得一枚破境丹，但其中暗藏派系之争。',
+    tags: ['宗门', '试炼', '派系', '破境'],
+    weightRules: {
+      heavenlyLaw: { '试炼之路': 3 },
+      storyGravity: { '宗门': 3, '战斗': 2 },
+      daoPath: { '剑修': 2, '丹道': 1 },
+    },
+    openingSeed: {
+      addEntities: [
+        { id: 'ent_trial_token', name: '试炼令牌', kind: 'prop', affordances: ['observe', 'investigate'] },
+        { id: 'ent_sect_elder', name: '宗门执事', kind: 'npc', affordances: ['social', 'negotiate', 'observe'] },
+      ],
+      addThreads: [
+        { threadId: 'thread_sect_trial', type: 'quest', title: '三重试炼', stage: 1, maxStage: 3, status: 'active', urgency: 2, visibility: 'public' },
+        { threadId: 'thread_sect_faction', type: 'intrigue', title: '派系暗流', stage: 1, maxStage: 3, status: 'dormant', urgency: 1, visibility: 'hidden' },
+      ],
+      addClock: {
+        clockId: 'clock_trial_deadline',
+        label: '试炼截止',
+        current: 0, max: 4,
+        onFull: 'divert',
+      },
+    },
+    beats: [
+      {
+        beatId: 'sect_01', title: '试炼之门',
+        dramaticGoal: '了解试炼规则，选择参与方式。',
+        advanceSignals: { categories: ['social', 'investigate'], targets: ['ent_sect_elder', 'thread_sect_trial'] },
+        bendSignals: { categories: ['negotiate', 'observe'], targets: ['ent_trial_token'] },
+        stallSignals: { categories: ['rest', 'wait', 'cultivate'] },
+        shatterKeywords: ['拒绝试炼', '离开宗门', '攻击执事'],
+        allowedReveals: ['试炼有三道关卡', '派系之争已渗透试炼'],
+        forbiddenReveals: ['破境丹的真实效果', '派系首领的身份'],
+        nextOnAdvance: 'sect_02', nextOnBend: 'sect_02', nextOnStall: 'sect_01', nextOnShatter: 'sect_01_shattered',
+      },
+      {
+        beatId: 'sect_02', title: '派系暗流',
+        dramaticGoal: '在试炼中看清宗门内的权力博弈。',
+        advanceSignals: { categories: ['battle', 'cultivate'], targets: ['thread_sect_trial'] },
+        bendSignals: { categories: ['social', 'negotiate', 'deceive'], targets: ['thread_sect_faction'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['公开挑战宗门', '退出试炼', '投靠对立派系'],
+        allowedReveals: ['派系之一在操控试炼', '破境丹被动了手脚'],
+        forbiddenReveals: ['操控者的真实身份'],
+        nextOnAdvance: 'sect_03', nextOnBend: 'sect_03', nextOnStall: 'sect_02', nextOnShatter: 'sect_02_shattered',
+      },
+      {
+        beatId: 'sect_03', title: '破境丹的代价',
+        dramaticGoal: '决定是否接受破境丹及其背后的代价。',
+        advanceSignals: { categories: ['cultivate', 'social'], targets: ['thread_sect_trial'] },
+        bendSignals: { categories: ['negotiate', 'deceive'], targets: ['thread_sect_faction'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['拒绝破境丹', '摧毁试炼', '摧毁宗门'],
+        allowedReveals: ['破境丹的真实代价'],
+        forbiddenReveals: [],
+        nextOnAdvance: null, nextOnBend: null, nextOnStall: null, nextOnShatter: null,
+      },
+    ],
+  },
+
+  tower_expedition: {
+    id: 'tower_expedition',
+    family: 'exploration',
+    title: '古塔遗踪',
+    publicPitch: '荒漠深处有一座倒悬的古塔，每深入一层，时间便倒流一分。',
+    tags: ['遗迹', '古塔', '探索', '时间'],
+    weightRules: {
+      heavenlyLaw: { '时空紊乱': 3 },
+      storyGravity: { '探索': 3, '秘境': 2 },
+      daoPath: { '阵法': 2, '游侠': 2 },
+    },
+    openingSeed: {
+      addEntities: [
+        { id: 'ent_tower_map', name: '古塔残图', kind: 'clue', affordances: ['investigate', 'observe'] },
+        { id: 'ent_tower_guide', name: '向导老者', kind: 'npc', affordances: ['social', 'negotiate', 'observe'] },
+      ],
+      addThreads: [
+        { threadId: 'thread_tower_expedition', type: 'quest', title: '古塔深处', stage: 1, maxStage: 3, status: 'active', urgency: 2, visibility: 'public' },
+        { threadId: 'thread_tower_time', type: 'mystery', title: '倒流的时间', stage: 1, maxStage: 3, status: 'dormant', urgency: 1, visibility: 'hidden' },
+      ],
+      addClock: {
+        clockId: 'clock_tower_collapse',
+        label: '古塔崩塌',
+        current: 0, max: 5,
+        onFull: 'divert',
+      },
+    },
+    beats: [
+      {
+        beatId: 'tower_01', title: '倒悬之塔',
+        dramaticGoal: '找到古塔入口，决定是否深入。',
+        advanceSignals: { categories: ['investigate', 'travel'], targets: ['ent_tower_map', 'thread_tower_expedition'] },
+        bendSignals: { categories: ['social', 'negotiate'], targets: ['ent_tower_guide'] },
+        stallSignals: { categories: ['rest', 'wait', 'cultivate'] },
+        shatterKeywords: ['放弃古塔', '摧毁入口', '封住塔门'],
+        allowedReveals: ['古塔不止一层', '塔内时间流速异常'],
+        forbiddenReveals: ['塔底的真相', '古塔的建造者'],
+        nextOnAdvance: 'tower_02', nextOnBend: 'tower_02', nextOnStall: 'tower_01', nextOnShatter: 'tower_01_shattered',
+      },
+      {
+        beatId: 'tower_02', title: '时间逆流',
+        dramaticGoal: '在塔中面对时间逆流带来的危险与机遇。',
+        advanceSignals: { categories: ['battle', 'cultivate', 'investigate'], targets: ['thread_tower_time'] },
+        bendSignals: { categories: ['use_relic', 'social'], targets: ['thread_tower_expedition'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['逃离古塔', '摧毁塔层', '破坏时间法则'],
+        allowedReveals: ['时间逆流可以修复旧伤', '塔中困着前人'],
+        forbiddenReveals: ['古塔的真正用途'],
+        nextOnAdvance: 'tower_03', nextOnBend: 'tower_03', nextOnStall: 'tower_02', nextOnShatter: 'tower_02_shattered',
+      },
+      {
+        beatId: 'tower_03', title: '塔底之秘',
+        dramaticGoal: '到达塔底，面对古塔的最终真相。',
+        advanceSignals: { categories: ['investigate', 'use_relic'], targets: ['thread_tower_time'] },
+        bendSignals: { categories: ['battle', 'negotiate'], targets: ['thread_tower_expedition'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['拒绝真相', '离开塔底', '摧毁塔底'],
+        allowedReveals: ['古塔的建造目的', '时间逆流的源头'],
+        forbiddenReveals: [],
+        nextOnAdvance: null, nextOnBend: null, nextOnStall: null, nextOnShatter: null,
+      },
+    ],
+  },
+};
+
+/* ---------- Director 核心模块 ---------- */
+Story.Director = {};
+
+/**
+ * 计算单个 Recipe 在当前世界与角色配置下的权重。
+ * 权重来源：天道、故事引力、角色道途、角色愿望关键词。
+ * 返回 0~100 的整数，同分时用 RNG 打破平局。
+ */
+Story.Director.scoreRecipe = function (state, recipe) {
+  var score = 5; // 基础分
+  var rules = recipe.weightRules || {};
+  var bible = state.world.worldBible || {};
+  // 天道匹配
+  var hl = bible.heavenlyLaw || '';
+  var hlRules = rules.heavenlyLaw || {};
+  Object.keys(hlRules).forEach(function (k) {
+    if (hl.indexOf(k) >= 0) score += hlRules[k];
+  });
+  // 故事引力匹配
+  var sg = (bible.storyGravity || bible.storyFocus || '');
+  var sgRules = rules.storyGravity || {};
+  Object.keys(sgRules).forEach(function (k) {
+    if (sg.indexOf(k) >= 0) score += sgRules[k];
+  });
+  // 角色道途匹配
+  var daoRules = rules.daoPath || {};
+  state.actors.forEach(function (a) {
+    var dp = a.daoPath || '';
+    Object.keys(daoRules).forEach(function (k) {
+      if (dp.indexOf(k) >= 0) score += daoRules[k];
+    });
+  });
+  // 角色愿望关键词匹配
+  state.actors.forEach(function (a) {
+    var wish = a.publicWish || '';
+    (recipe.tags || []).forEach(function (tag) {
+      if (wish.indexOf(tag) >= 0) score += 1;
+    });
+  });
+  return Math.min(100, Math.max(1, score));
+};
+
+/**
+ * 生成三张候选命途签。
+ * 规则：
+ *   - 同种子必然生成相同三张。
+ *   - 三张不得来自同一 family。
+ *   - 三张至少覆盖 mystery、intrigue/conflict、exploration 中的两类。
+ *   - 权重影响但不锁死结果。
+ */
+Story.Director.generateCandidates = function (state) {
+  var recipes = [
+    Story.DirectorRecipes.relic_identity,
+    Story.DirectorRecipes.trade_contract,
+    Story.DirectorRecipes.sect_trial,
+    Story.DirectorRecipes.tower_expedition,
+  ];
+  var rng = Story.rngFor('director', state);
+  // 计算权重
+  var scored = recipes.map(function (r) {
+    return { recipe: r, score: Story.Director.scoreRecipe(state, r) };
+  });
+  // 按 family 分组，取每组最高分
+  var byFamily = {};
+  scored.forEach(function (s) {
+    var f = s.recipe.family;
+    if (!byFamily[f] || byFamily[f].score < s.score) byFamily[f] = s;
+  });
+  var families = Object.keys(byFamily);
+  // 按权重排序
+  var ranked = families.map(function (f) { return byFamily[f]; }).sort(function (a, b) { return b.score - a.score; });
+  // 确保覆盖至少两类：mystery + (intrigue|conflict|exploration)
+  var picked = [];
+  var usedFamilies = {};
+  function addFromRanked(idx) {
+    if (picked.length >= 3) return;
+    for (var i = idx; i < ranked.length; i++) {
+      if (picked.length >= 3) break;
+      if (usedFamilies[ranked[i].recipe.family]) continue;
+      picked.push(ranked[i].recipe);
+      usedFamilies[ranked[i].recipe.family] = true;
+    }
+  }
+  addFromRanked(0);
+  // 如果不足 3 张（理论上 4 family 不会），补充
+  if (picked.length < 3) {
+    for (var j = 0; j < ranked.length && picked.length < 3; j++) {
+      if (picked.indexOf(ranked[j].recipe) < 0) picked.push(ranked[j].recipe);
+    }
+  }
+  // 转换为候选卡结构
+  var candidates = picked.slice(0, 3).map(function (r) {
+    return {
+      arcId: 'arc_' + r.id,
+      recipeId: r.id,
+      family: r.family,
+      title: r.title,
+      publicPitch: r.publicPitch,
+      tags: r.tags.slice(),
+      openingHooks: (r.openingSeed.addThreads || []).map(function (t) { return t.threadId; }).concat(
+        (r.openingSeed.addEntities || []).map(function (e) { return e.id; })
+      ),
+      voteScore: 0,
+      voteBreakdown: {},
+    };
+  });
+  return candidates;
+};
+
+/**
+ * 激活选中卷纲。
+ * 写入 activeArc，未选中的写入 dormantArcs。
+ * 按 openingSeed 创建线程、实体、时钟。
+ * 注意：不修改 currentScene（由调用方在 activateArc 之后创建场景）。
+ */
+Story.Director.activateArc = function (state, arcId) {
+  var d = state.story.director;
+  var candidate = d.candidates.find(function (c) { return c.arcId === arcId; });
+  if (!candidate) throw new Error('未找到候选卷纲：' + arcId);
+  var recipe = Story.DirectorRecipes[candidate.recipeId];
+  if (!recipe) throw new Error('未找到 Recipe：' + candidate.recipeId);
+  // 构造 activeArc
+  var arc = {
+    arcId: candidate.arcId,
+    recipeId: candidate.recipeId,
+    family: candidate.family,
+    title: candidate.title,
+    publicPitch: candidate.publicPitch,
+    tags: candidate.tags.slice(),
+    status: 'active',
+    startedAtChapter: state.story.chapterIndex || 0,
+    currentBeatIndex: 0,
+    beats: (recipe.beats || []).map(function (b, i) {
+      return {
+        beatId: b.beatId,
+        title: b.title,
+        dramaticGoal: b.dramaticGoal,
+        status: i === 0 ? 'active' : 'pending',
+        advanceSignals: b.advanceSignals,
+        bendSignals: b.bendSignals,
+        stallSignals: b.stallSignals,
+        shatterKeywords: b.shatterKeywords || [],
+        allowedReveals: b.allowedReveals || [],
+        forbiddenReveals: b.forbiddenReveals || [],
+        nextOnAdvance: b.nextOnAdvance,
+        nextOnBend: b.nextOnBend,
+        nextOnStall: b.nextOnStall,
+        nextOnShatter: b.nextOnShatter,
+      };
+    }),
+    pressureClocks: [],
+    divergenceLog: [],
+    revealLog: [],
+  };
+  // 创建压力时钟
+  if (recipe.openingSeed && recipe.openingSeed.addClock) {
+    var c = recipe.openingSeed.addClock;
+    arc.pressureClocks.push({
+      clockId: c.clockId,
+      label: c.label,
+      current: c.current || 0,
+      max: c.max || 3,
+      onFull: c.onFull || 'divert',
+    });
+  }
+  d.activeArc = arc;
+  d.phase = 'active';
+  // 未选中的放入 dormantArcs
+  d.candidates.forEach(function (c) {
+    if (c.arcId === arcId) return;
+    d.dormantArcs.push({
+      arcId: c.arcId,
+      recipeId: c.recipeId,
+      family: c.family,
+      title: c.title,
+      status: 'dormant',
+      wakeConditions: ['chapterIndex >= 8', 'arc ' + arcId + ' completed'],
+    });
+  });
+  // 按 openingSeed 创建线程
+  if (recipe.openingSeed && recipe.openingSeed.addThreads) {
+    recipe.openingSeed.addThreads.forEach(function (t) {
+      var thread = {
+        threadId: t.threadId,
+        type: t.type || 'mystery',
+        title: t.title || t.threadId,
+        stage: t.stage || 1,
+        maxStage: t.maxStage || 4,
+        urgency: t.urgency || 1,
+        visibility: t.visibility || 'public',
+        status: t.status || 'active',
+        sourceArcId: arcId,
+        ownerActorIds: [],
+        involvedActorIds: [],
+        summary: t.title || '',
+        triggerTags: [],
+        lastAdvancedChapter: 0,
+        sourceChapter: state.story.chapterIndex || 0,
+      };
+      state.story.activeThreads.push(thread);
+    });
+  }
+  // 按 openingSeed 增加场景实体
+  if (recipe.openingSeed && recipe.openingSeed.addEntities) {
+    var scene = state.story.currentScene;
+    if (scene && scene.visibleEntities) {
+      recipe.openingSeed.addEntities.forEach(function (e) {
+        // 避免重复
+        if (!scene.visibleEntities.some(function (ve) { return ve.id === e.id; })) {
+          scene.visibleEntities.push({
+            id: e.id,
+            name: e.name,
+            kind: e.kind,
+            affordances: (e.affordances || []).slice(),
+          });
+        }
+      });
+    }
+  }
+  return arc;
+};
+
+/* ---------- DirectorVote 投票模块 ---------- */
+Story.DirectorVote = {};
+
+/**
+ * 投票结算 → 激活卷纲 → 生成开局场景与叙事。
+ * 这是 createSession(skipOpening=true) 之后调用的收尾函数。
+ */
+Story.Director.finalizeSessionWithArc = async function (state, arcId) {
+  var d = state.story.director;
+  if (d.phase !== 'voting') throw new Error('当前不在投票阶段');
+  var arc = Story.Director.activateArc(state, arcId);
+  // 激活后生成开局场景与叙事
+  await Story._generateOpening(state);
+  return arc;
+};
+
+/* ---------- Director.evaluate：Beat 推进判断 ---------- */
+
+/** 检测是否触发了打碎（shatter）条件 */
+Story.Director._detectShatter = function (beat, action, rawText) {
+  if (!beat || !beat.shatterKeywords || !beat.shatterKeywords.length) return false;
+  var text = (action && action.custom && action.custom.text) || rawText || '';
+  var cat = (action && action.intentCategory) || '';
+  for (var i = 0; i < beat.shatterKeywords.length; i++) {
+    if (text.indexOf(beat.shatterKeywords[i]) >= 0) return true;
+  }
+  if (cat === 'flee' || cat === 'travel') {
+    var kw = ['离开', '不再', '放弃', '告别'];
+    for (var j = 0; j < kw.length; j++) {
+      if (text.indexOf(kw[j]) >= 0) return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * 评估本回合行动对当前 Beat 的影响。返回 DirectorPlan（不直接修改状态）。
+ */
+Story.Director.evaluate = function (state, envelope) {
+  var d = state.story.director;
+  if (d.phase !== 'active' || !d.activeArc) return null;
+  var arc = d.activeArc;
+  var beat = (arc.beats || [])[arc.currentBeatIndex];
+  if (!beat || beat.status !== 'active') return null;
+  var actions = [];
+  if (envelope.actions) {
+    envelope.actions.forEach(function (a) {
+      actions.push({ actorId: a.actorId, intentCategory: a.intentCategory, targetId: a.targetId, custom: a.custom });
+    });
+  }
+  var humanActions = actions.filter(function (a) {
+    var actor = state.actors.find(function (ac) { return ac.id === a.actorId; });
+    return actor && actor.controller === 'human';
+  });
+  var primaryAction = humanActions.length > 0 ? humanActions[0] : (actions.length > 0 ? actions[0] : null);
+  var rawText = '';
+  if (primaryAction && primaryAction.custom) rawText = primaryAction.custom.text || '';
+  var result = 'stall';
+  var reasons = [];
+  // 1. shatter
+  if (Story.Director._detectShatter(beat, primaryAction, rawText)) {
+    result = 'shatter';
+    reasons.push('玩家触发了打碎关键词');
+  }
+  // 2. advance
+  if (result === 'stall' && primaryAction && beat.advanceSignals) {
+    var catMatch = (beat.advanceSignals.categories || []).indexOf(primaryAction.intentCategory) >= 0;
+    var tgtMatch = primaryAction.targetId && (beat.advanceSignals.targets || []).indexOf(primaryAction.targetId) >= 0;
+    if (catMatch || tgtMatch) {
+      result = 'advance';
+      reasons.push('玩家行动匹配推进信号');
+    }
+  }
+  // 3. bend
+  if (result === 'stall' && primaryAction && beat.bendSignals) {
+    var bCatMatch = (beat.bendSignals.categories || []).indexOf(primaryAction.intentCategory) >= 0;
+    var bTgtMatch = primaryAction.targetId && (beat.bendSignals.targets || []).indexOf(primaryAction.targetId) >= 0;
+    if (bCatMatch || bTgtMatch) {
+      result = 'bend';
+      reasons.push('玩家用偏转方式推进');
+    }
+  }
+  // 4. stall
+  if (result === 'stall' && primaryAction && beat.stallSignals) {
+    if ((beat.stallSignals.categories || []).indexOf(primaryAction.intentCategory) >= 0) {
+      reasons.push('玩家未碰主线');
+    }
+  }
+  // 时钟
+  var clockDeltas = [];
+  (arc.pressureClocks || []).forEach(function (c) {
+    if (result === 'stall' || result === 'shatter') {
+      clockDeltas.push({ clockId: c.clockId, delta: 1 });
+    }
+  });
+  // arcDeltas
+  var arcDeltas = [];
+  if (result === 'advance' || result === 'bend') {
+    var nextBeatId = result === 'advance' ? beat.nextOnAdvance : beat.nextOnBend;
+    if (nextBeatId) {
+      arcDeltas.push({ op: 'ADVANCE_BEAT', beatId: beat.beatId, nextBeatId: nextBeatId, result: result });
+    } else {
+      arcDeltas.push({ op: 'COMPLETE_ARC', beatId: beat.beatId, result: result });
+    }
+  } else if (result === 'shatter') {
+    var shatterBeatId = beat.nextOnShatter || (beat.beatId + '_shattered');
+    arcDeltas.push({ op: 'SHATTER_ARC', beatId: beat.beatId, shatterBeatId: shatterBeatId, result: result });
+  }
+  var narrativeGuide = {
+    currentArcTitle: arc.title,
+    beatGoal: beat.dramaticGoal || '',
+    beatTitle: beat.title,
+    result: result,
+    allowedReveals: beat.allowedReveals || [],
+    forbiddenReveals: beat.forbiddenReveals || [],
+  };
+  return {
+    arcId: arc.arcId,
+    beatId: beat.beatId,
+    result: result,
+    reasons: reasons,
+    clockDeltas: clockDeltas,
+    arcDeltas: arcDeltas,
+    sceneDeltas: [],
+    threadDeltas: [],
+    narrativeGuide: narrativeGuide,
+  };
+};
+
+/**
+ * 应用 DirectorPlan 到状态（仅在 _commitPendingResolution 中调用）。
+ */
+Story.Director.applyPlan = function (state, plan) {
+  if (!plan) return;
+  var d = state.story.director;
+  var arc = d.activeArc;
+  if (!arc || arc.arcId !== plan.arcId) return;
+  (plan.clockDeltas || []).forEach(function (cd) {
+    var clock = (arc.pressureClocks || []).find(function (c) { return c.clockId === cd.clockId; });
+    if (clock) clock.current = Math.min(clock.max, (clock.current || 0) + (cd.delta || 0));
+  });
+  (plan.arcDeltas || []).forEach(function (ad) {
+    if (ad.op === 'ADVANCE_BEAT') {
+      var curBeat = (arc.beats || []).find(function (b) { return b.beatId === ad.beatId; });
+      if (curBeat) curBeat.status = 'completed';
+      var nextIdx = (arc.beats || []).findIndex(function (b) { return b.beatId === ad.nextBeatId; });
+      if (nextIdx >= 0) { arc.currentBeatIndex = nextIdx; arc.beats[nextIdx].status = 'active'; }
+    } else if (ad.op === 'COMPLETE_ARC') {
+      var cb = (arc.beats || []).find(function (b) { return b.beatId === ad.beatId; });
+      if (cb) cb.status = 'completed';
+      arc.status = 'completed';
+      d.phase = 'completed';
+      d.completedArcs.push({ arcId: arc.arcId, title: arc.title, completedAtChapter: state.story.chapterIndex });
+    } else if (ad.op === 'SHATTER_ARC') {
+      var sb = (arc.beats || []).find(function (b) { return b.beatId === ad.beatId; });
+      if (sb) sb.status = 'shattered';
+      arc.status = 'shattered';
+      var shatteredBeat = {
+        beatId: ad.shatterBeatId, title: '碎片',
+        dramaticGoal: '原有路线已毁，新的威胁正在逼近。',
+        status: 'active',
+        advanceSignals: { categories: ['investigate', 'social', 'travel'], targets: [] },
+        bendSignals: { categories: ['negotiate', 'observe'], targets: [] },
+        stallSignals: { categories: ['rest', 'wait', 'cultivate'] },
+        shatterKeywords: [], allowedReveals: [], forbiddenReveals: [],
+        nextOnAdvance: null, nextOnBend: null, nextOnStall: null, nextOnShatter: null,
+      };
+      arc.beats.push(shatteredBeat);
+      arc.currentBeatIndex = arc.beats.length - 1;
+    }
+  });
+  arc.divergenceLog = arc.divergenceLog || [];
+  arc.divergenceLog.push({
+    chapterIndex: state.story.chapterIndex, beatId: plan.beatId,
+    result: plan.result, reasons: plan.reasons || [], timestamp: Date.now(),
+  });
+  arc.revealLog = arc.revealLog || [];
+  if (plan.narrativeGuide && plan.narrativeGuide.allowedReveals) {
+    plan.narrativeGuide.allowedReveals.forEach(function (r) {
+      if (arc.revealLog.indexOf(r) < 0) arc.revealLog.push(r);
+    });
+  }
+  d.lastDirectorEvent = {
+    arcId: plan.arcId, beatId: plan.beatId,
+    result: plan.result, chapterIndex: state.story.chapterIndex,
+  };
+};
+
+/**
+ * 获取当前 Beat 的叙事引导（供 Narration.buildBrief 调用）。
+ */
+Story.Director.buildNarrativeGuide = function (state) {
+  var d = state.story.director;
+  if (d.phase !== 'active' || !d.activeArc) return null;
+  var arc = d.activeArc;
+  var beat = (arc.beats || [])[arc.currentBeatIndex];
+  if (!beat) return null;
+  var clocks = (arc.pressureClocks || []).map(function (c) {
+    return { label: c.label, current: c.current, max: c.max };
+  });
+  // V3.3.2 修复：从 pendingResolution.directorPlan 取本回合 result
+  var beatResult = null;
+  var pr = state.story.pendingResolution;
+  if (pr && pr.directorPlan && pr.directorPlan.result) {
+    beatResult = pr.directorPlan.result;
+  }
+  return {
+    arcTitle: arc.title,
+    arcPromise: arc.publicPitch || '',
+    currentBeatTitle: beat.title,
+    dramaticGoal: beat.dramaticGoal || '',
+    beatResult: beatResult,
+    allowedReveals: beat.allowedReveals || [],
+    forbiddenReveals: beat.forbiddenReveals || [],
+    beatStatus: beat.status,
+    pressureClocks: clocks,
+  };
+};
+
+/**
+ * 提交投票（真人或 Bot）。
+ * 玩家可改票，Bot 不改票。
+ */
+Story.DirectorVote.submitVote = function (state, actorId, arcId) {
+  var d = state.story.director;
+  if (d.phase !== 'voting') throw new Error('当前不在投票阶段');
+  var candidate = d.candidates.find(function (c) { return c.arcId === arcId; });
+  if (!candidate) throw new Error('无效的候选卷纲：' + arcId);
+  d.votesByActorId[actorId] = arcId;
+};
+
+/**
+ * Bot 自动投票：根据角色道途/愿望/偏好计算权重。
+ */
+Story.DirectorVote.autoVoteForBot = function (state, actorId) {
+  var d = state.story.director;
+  if (d.phase !== 'voting') return null;
+  var actor = state.actors.find(function (a) { return a.id === actorId; });
+  if (!actor) return null;
+  var rng = Story.rngFor('director', state);
+  // 简单权重：道途偏好 + 标签匹配
+  var scored = d.candidates.map(function (c) {
+    var recipe = Story.DirectorRecipes[c.recipeId];
+    var s = Story.Director.scoreRecipe(state, recipe);
+    // 角色个人偏好
+    if (actor.choicePrefs) {
+      (c.tags || []).forEach(function (tag) {
+        if (actor.choicePrefs[tag]) s += actor.choicePrefs[tag] * 2;
+      });
+    }
+    // 已投票的角色选择（理论上 Bot 不应参考其他投票，此处仅按自身偏好）
+    return { arcId: c.arcId, score: s };
+  });
+  // 加权随机选择（制造"Bot 似乎有自己偏好"的感觉）
+  var total = scored.reduce(function (sum, s) { return sum + Math.max(0, s.score); }, 0);
+  if (total <= 0) {
+    // 全部同分，随机
+    return d.candidates[Math.floor(rng.next() * d.candidates.length)].arcId;
+  }
+  var roll = rng.next() * total;
+  var acc = 0;
+  for (var i = 0; i < scored.length; i++) {
+    acc += Math.max(0, scored[i].score);
+    if (roll <= acc) return scored[i].arcId;
+  }
+  return scored[scored.length - 1].arcId;
+};
+
+/**
+ * 结算投票：统计票数，同票时用导演 RNG 决定。
+ * 返回胜出 arcId。
+ */
+Story.DirectorVote.finalizeVote = function (state) {
+  var d = state.story.director;
+  if (d.phase !== 'voting') throw new Error('当前不在投票阶段');
+  var rng = Story.rngFor('director', state);
+  // 统计票数
+  var tally = {};
+  d.candidates.forEach(function (c) { tally[c.arcId] = 0; });
+  Object.keys(d.votesByActorId).forEach(function (aid) {
+    var arcId = d.votesByActorId[aid];
+    if (tally[arcId] !== undefined) tally[arcId]++;
+  });
+  // 找最高票
+  var maxVotes = 0;
+  var winners = [];
+  Object.keys(tally).forEach(function (arcId) {
+    if (tally[arcId] > maxVotes) { maxVotes = tally[arcId]; winners = [arcId]; }
+    else if (tally[arcId] === maxVotes) winners.push(arcId);
+  });
+  // 同票时用 RNG 决定
+  var winner = winners.length === 1 ? winners[0] : winners[Math.floor(rng.next() * winners.length)];
+  // 更新候选卡上的投票记录
+  d.candidates.forEach(function (c) { c.voteScore = tally[c.arcId] || 0; });
+  return winner;
 };
 
 /* ---------- V3.3 Phase 2：共享场景下的角色在场状态 ---------- */
@@ -2192,6 +3009,30 @@ Story.ChoiceFactory.buildForActor = function (state, actorId, scene, envelope) {
   }
   // 顺序扰动（位置不固定）
   const ordered = rng.shuffle(chosen).slice(0, 3);
+  // V3.3.2：分配 directorRole（每回合最多一项 arc 选项）
+  var arc = state.story.director && state.story.director.activeArc;
+  var beat = arc && (arc.beats || [])[arc.currentBeatIndex];
+  var arcAssigned = false;
+  ordered.forEach(function (c) {
+    if (!arcAssigned && beat && arc.status === 'active' && beat.status === 'active') {
+      var isArc = false;
+      if (beat.advanceSignals) {
+        isArc = (beat.advanceSignals.categories || []).indexOf(c.intentCategory) >= 0 ||
+                (beat.advanceSignals.targets || []).indexOf(c.targetId) >= 0;
+      }
+      if (!isArc && beat.bendSignals) {
+        isArc = (beat.bendSignals.categories || []).indexOf(c.intentCategory) >= 0 ||
+                (beat.bendSignals.targets || []).indexOf(c.targetId) >= 0;
+      }
+      if (isArc) { c.directorRole = 'arc'; arcAssigned = true; return; }
+    }
+    // 角色个人目标或命盘相关
+    if (c.targetType === 'npc' || c.intentCategory === 'social' || c.intentCategory === 'cultivate') {
+      c.directorRole = 'character';
+    } else {
+      c.directorRole = 'scene';
+    }
+  });
   // 写入 recent
   ordered.forEach(function (c) {
     state.story.recentChoiceFingerprints.push(c.fingerprint);
@@ -2474,6 +3315,8 @@ Story.Narration.buildBrief = function (state, scene, envelope) {
     focalActors: focalActors,
     narrationBeats: (envelope && envelope.narrationBeats) || [],
     forbiddenLeaks: forbiddenLeaks,
+    // V3.3.2：Director 叙事引导——告知 AI 当前卷纲与节拍目标
+    director: Story.Director.buildNarrativeGuide(state) || null,
     style: {
       proseLength: '450-850 Chinese characters',
       paragraphCount: '3-5',
@@ -2492,13 +3335,20 @@ Story.Narration.assembleFromAI = function (state, scene, envelope, narration) {
   const parsed = Story.Provider.parseNarrationResponse(narration);
   let title = parsed.title || Story.Narration.buildFallbackTitle(state, scene, envelope);
   let chapter = parsed.chapter || '';
-  chapter = Story.Narration._stripForbidden(chapter);
+  // V3.3.2 修复：AI 路径信任 AI 文笔，不强制 _stripForbidden（仅离线兜底路径需要）
   const action = (envelope && envelope.actions && envelope.actions[0]) || null;
   const provenance = parsed.plainText ? 'ai-plain' : 'ai-json';
+  // V3.3.2 修复：优先用 AI 正文前 80 字作为摘要，而非机械拼接
+  var chapterSummary = '';
+  if (chapter) {
+    chapterSummary = chapter.replace(/\n+/g, ' ').slice(0, 80);
+  } else {
+    chapterSummary = Story.Narration._summary(state, scene, action, envelope.narrationBeats || []);
+  }
   return {
     title: title,
     chapter: chapter,
-    chapterSummary: Story.Narration._summary(state, scene, action, envelope.narrationBeats || []),
+    chapterSummary: chapterSummary,
     timePassed: (action && action.timePassed) || { value: 1, unit: '片刻' },
     endingImage: parsed.endingImage || '',
     dialogues: Array.isArray(parsed.dialogues) ? parsed.dialogues : [],
@@ -2539,6 +3389,7 @@ Story.Narration.applyNarration = function (state, chapter, envelope, isOpening) 
     chapterSummary: chapter.chapterSummary || (chapter.chapter || '').slice(0, 80),
     timePassed: chapter.timePassed || null,
     endingImage: chapter.endingImage || '',
+    dialogues: Array.isArray(chapter.dialogues) ? chapter.dialogues : [],
     provenance: chapter.provenance || 'offline-resolved',
     narrationStatus: chapter.narrationStatus || 'ok',
     renderVersion: 0,
@@ -2570,12 +3421,12 @@ Story.Provider.ERROR_CODES = ['NO_API_CONFIG','NO_API_KEY','NETWORK_ERROR','CORS
 /** 调用 AI 叙事（兼容旧 ai.provider.narrate）。返回归一化后的 {title,chapter,dialogues,endingImage,_autoFixed} 或 null。 */
 Story.Provider.narrate = async function (state, brief) {
   if (!Story.ai.enabled) {
-    Story.setAIStatus('disabled', { code: 'disabled', message: 'AI 未启用，当前使用AI 文本生成失败，本回合裁决已保留，等待重试。。' });
+    Story.setAIStatus('disabled', { code: 'disabled', message: 'AI 未启用，本回合裁决已保留，等待重试。' });
     state.api.lastStatus = 'offline'; state.api.lastErrorCode = null;
     return null;
   }
   if (!Story.ai.provider || typeof Story.ai.provider.narrate !== 'function') {
-    Story.setAIStatus('fallback', { code: 'NO_API_CONFIG', message: 'AI 已开启，但缺少可用 Provider，已使用AI 文本生成失败，本回合裁决已保留，等待重试。。' });
+    Story.setAIStatus('fallback', { code: 'NO_API_CONFIG', message: 'AI 已开启，但缺少可用 Provider，本回合裁决已保留，等待重试。' });
     state.api.lastStatus = 'offline'; state.api.lastErrorCode = 'NO_API_CONFIG';
     return null;
   }
@@ -2589,7 +3440,7 @@ Story.Provider.narrate = async function (state, brief) {
       const wrapped = await Story.ai._withTimeout(Story.ai.provider.narrate(ctx), Story.ai.timeoutMs);
       // 超时：已等待完整超时窗口，不重试，直接降级
       if (wrapped && wrapped.__timeout) {
-        Story.setAIStatus('fallback', { code: 'TIMEOUT', message: 'API 请求超时，已使用AI 文本生成失败，本回合裁决已保留，等待重试。。', lastRequestAt: requestedAt });
+        Story.setAIStatus('fallback', { code: 'TIMEOUT', message: 'API 请求超时，本回合裁决已保留，等待重试。', lastRequestAt: requestedAt });
         state.api.lastStatus = 'offline'; state.api.lastErrorCode = 'TIMEOUT';
         return null;
       }
@@ -2597,7 +3448,7 @@ Story.Provider.narrate = async function (state, brief) {
       state.api.lastResponseAt = Date.now();
       if (!raw) {
         if (attempt === 0) { Story.setAIStatus('received', { message: '首次响应为空，自动重试一次。', lastRequestAt: requestedAt }); continue; }
-        Story.setAIStatus('fallback', { code: 'EMPTY_RESPONSE', message: 'API 返回空内容，已使用AI 文本生成失败，本回合裁决已保留，等待重试。。', lastRequestAt: requestedAt });
+        Story.setAIStatus('fallback', { code: 'EMPTY_RESPONSE', message: 'API 返回空内容，本回合裁决已保留，等待重试。', lastRequestAt: requestedAt });
         state.api.lastStatus = 'offline'; state.api.lastErrorCode = 'EMPTY_RESPONSE';
         return null;
       }
@@ -2606,7 +3457,7 @@ Story.Provider.narrate = async function (state, brief) {
       const errors = Story.Provider.validateNarrationOnly(parsed);
       if (errors.length) {
         if (attempt === 0) { Story.setAIStatus('received', { message: '检测到格式偏差，自动修复格式后重试。', errors: errors, lastRequestAt: requestedAt }); continue; }
-        Story.setAIStatus('fallback', { code: 'INVALID_SCHEMA', message: 'AI 返回字段不合规，已使用AI 文本生成失败，本回合裁决已保留，等待重试。。', errors: errors, lastRequestAt: requestedAt });
+        Story.setAIStatus('fallback', { code: 'INVALID_SCHEMA', message: 'AI 返回字段不合规，本回合裁决已保留，等待重试。', errors: errors, lastRequestAt: requestedAt });
         state.api.lastStatus = 'offline'; state.api.lastErrorCode = 'INVALID_SCHEMA'; state.api.lastErrorMessage = errors.join('；');
         return null;
       }
@@ -2619,7 +3470,7 @@ Story.Provider.narrate = async function (state, brief) {
     return null;
   } catch (e) {
     const code = Story.Provider._classifyError(e && e.message);
-    Story.setAIStatus('fallback', { code: code, message: 'AI 文本生成失败，已使用AI 文本生成失败，本回合裁决已保留，等待重试。。' + (e && e.message ? '原因：' + e.message : ''), error: e && e.message, lastRequestAt: requestedAt });
+    Story.setAIStatus('fallback', { code: code, message: 'AI 文本生成失败，本回合裁决已保留，等待重试。' + (e && e.message ? '原因：' + e.message : ''), error: e && e.message, lastRequestAt: requestedAt });
     state.api.lastStatus = 'offline'; state.api.lastErrorCode = code; state.api.lastErrorMessage = (e && e.message) || '';
     return null;
   }
@@ -2640,24 +3491,114 @@ Story.Provider._classifyError = function (msg) {
 };
 
 Story.Provider._briefToCtx = function (state, brief) {
-  // 兼容旧 provider 期望的 ctx 形状，但内容为 NarrationBrief（不含选择原文/私密事实/账本）
-  const chosenActions = (brief._envelope && brief._envelope.actions) ? brief._envelope.actions.map(function (a) {
-    const actor = state.actors.find(function (x) { return x.id === a.actorId; });
-    return { actorId: a.actorId, publicAction: a.rawText || Story.Narration._catLabel(a.category), privateIntent: '', tags: [a.category], isCustom: a.source === 'custom' };
+  // V3.3.2 修复：传入完整 action 详情与 publicDelta，让 AI 知道本回合"既定事实"
+  var env = brief._envelope;
+  var chosenActions = (env && env.actions) ? env.actions.map(function (a) {
+    var actor = state.actors.find(function (x) { return x.id === a.actorId; });
+    return {
+      actorId: a.actorId,
+      actorName: actor ? actor.name : a.actorId,
+      publicAction: a.rawText || Story.Narration._catLabel(a.category),
+      privateIntent: a.custom ? (a.custom.text || '') : '',
+      category: a.category,
+      outcome: a.outcome || 'success',
+      outcomeLabel: Story.Narration._outcomeLabel(a.outcome),
+      gains: (a.gains || []).map(function (g) { return g.text; }),
+      costs: (a.costs || []).map(function (c) { return c.text; }),
+      timePassed: a.timePassed || null,
+      tags: [a.category],
+      isCustom: a.source === 'custom',
+    };
   }) : [];
+
+  // 从 publicDelta 提取本回合公开事件供 AI 参考
+  var turnEvents = [];
+  if (env && env.publicDelta) {
+    env.publicDelta.forEach(function (d) {
+      if (d.op === 'ADD_EVENT' && d.payload && d.payload.text) {
+        turnEvents.push(d.payload.text);
+      } else if (d.op === 'UPDATE_THREAD' && d.payload) {
+        turnEvents.push('线索推进：' + (d.target && d.target.threadId ? d.target.threadId : '未知') + '（' + (d.payload.op || 'advance') + '）');
+      } else if (d.op === 'UPDATE_RELATION' && d.payload && d.payload.publicHint) {
+        turnEvents.push(d.payload.publicHint);
+      } else if (d.op === 'UPDATE_ACTOR_STATUS' && d.payload) {
+        turnEvents.push('状态变化：' + (d.payload.key || '') + (d.payload.delta > 0 ? '+' : '') + d.payload.delta);
+      } else if (d.op === 'ADVANCE_TIME' && d.payload) {
+        turnEvents.push('时间流逝：' + (d.payload.value || 1) + ' ' + (d.payload.unit || '片刻'));
+      }
+    });
+  }
+
+  // 从 narrationBeats 提取既定事实摘要
+  var narrationBeats = (env && env.narrationBeats) || [];
+
+  // 活跃线索/威胁
+  var activeThreads = (state.story.activeThreads || []).filter(function (t) {
+    return t.status === 'active' || t.status === 'dormant';
+  }).map(function (t) {
+    return {
+      threadId: t.threadId, title: t.title, type: t.type,
+      stage: t.stage, maxStage: t.maxStage,
+      urgency: t.urgency, status: t.status, summary: t.summary || '',
+    };
+  });
+
+  // 公开事实与传闻（最近 N 条）
+  var publicFacts = (state.world.publicFacts || []).slice(-8);
+  var publicRumors = (state.world.publicRumors || []).slice(-8);
+
+  // 编年史（最近 5 条，供 AI 回顾前情）
+  var chronicleRecent = (state.story.chronicle || []).slice(-5).map(function (c) { return c.text; });
+
+  // 角色动态关系（而非静态 relationHints）
+  var cast = state.actors.map(function (a) {
+    var dynRelations = {};
+    if (a.relations) {
+      Object.keys(a.relations).forEach(function (rid) {
+        var r = a.relations[rid];
+        var other = state.actors.find(function (x) { return x.id === rid; });
+        if (other && (r.trust || r.suspicion || r.debt || r.respect)) {
+          dynRelations[other.name] = { trust: r.trust || 0, suspicion: r.suspicion || 0, debt: r.debt || 0, respect: r.respect || 0 };
+        }
+      });
+    }
+    return {
+      id: a.id, name: a.name,
+      publicProfile: a.identity + '·' + a.daoPath,
+      currentStatus: a.statusSummary || '',
+      publicGoal: a.publicWish || '',
+      visibleRelations: Object.keys(dynRelations).length ? dynRelations : (a.relationHints || {}),
+    };
+  });
+
   return {
     mode: 'turn',
     brief: brief,
     chosenActions: chosenActions,
-    world: { name: brief.world.name, year: brief.world.year, worldBibleSummary: (state.world.worldBible.rules || []).join(''), activeWorldHooks: (state.world.activeWorldHooks || []).slice(-12) },
-    cast: state.actors.map(function (a) { return { id: a.id, name: a.name, publicProfile: a.identity + '·' + a.daoPath, currentStatus: a.statusSummary, publicGoal: a.publicWish, visibleRelations: a.relationHints }; }),
-    previousChapter: state.story.currentChapter ? { title: state.story.currentChapter.title, shortSummary: (state.story.currentChapter.chapterSummary || '').slice(0, 300), chapterExcerpt: (state.story.currentChapter.chapter || '').slice(-2000), endingImage: state.story.currentChapter.endingImage || '' } : null,
+    turnEvents: turnEvents,
+    narrationBeats: narrationBeats,
+    activeThreads: activeThreads,
+    world: {
+      name: brief.world.name, year: brief.world.year,
+      worldBibleSummary: (state.world.worldBible.rules || []).join(''),
+      activeWorldHooks: (state.world.activeWorldHooks || []).slice(-12),
+      publicFacts: publicFacts, publicRumors: publicRumors,
+    },
+    cast: cast,
+    previousChapter: state.story.currentChapter ? {
+      title: state.story.currentChapter.title,
+      shortSummary: (state.story.currentChapter.chapterSummary || '').slice(0, 300),
+      chapterExcerpt: (state.story.currentChapter.chapter || '').slice(-2000),
+      endingImage: state.story.currentChapter.endingImage || '',
+    } : null,
+    recentSummary: (state.story.recentSummary || '').slice(-600) || null,
+    chronicleRecent: chronicleRecent.length ? chronicleRecent : null,
     constraints: {
       proseLength: brief.style.proseLength,
       noContradiction: true,
       noUnjustifiedPowerJump: true,
       forbiddenWithoutTrigger: ['高境界突破', '永久死亡', '飞升', '大势力覆灭', '新国家', '顶级法宝', '改写既有事实'],
-      narrationOnly: '只返回 {title, chapter, dialogues, endingImage}。不得返回 choices/statePatch/newFacts/newRumors/newHooks/newRelics/changedRelations/timePassed 等状态字段；状态已由本地裁决确定。',
+      narrationOnly: '只返回 {title, chapter, dialogues, endingImage}。不得返回 choices/statePatch/newFacts/newRumors/newHooks/newRelics/changedRelations/timePassed 等状态字段；状态已由本地裁决确定。chapter 必须严格依据 chosenActions 的 outcome/gains/costs 和 turnEvents 来写，不得忽略既定事实。',
     },
   };
 };
@@ -2862,7 +3803,7 @@ Story.onAIStatus = function (listener) {
 
 /* 兼容旧入口：请求 + 校验（V3.2 中 AI 仅返回文案，不再含 statePatch/choices） */
 Story.requestNarration = async function (ctx) {
-  if (!Story.ai.enabled) { Story.setAIStatus('disabled', { code: 'disabled', message: 'AI 未启用，当前使用AI 文本生成失败，本回合裁决已保留，等待重试。。' }); return null; }
+  if (!Story.ai.enabled) { Story.setAIStatus('disabled', { code: 'disabled', message: 'AI 未启用，本回合裁决已保留，等待重试。' }); return null; }
   if (!Story.ai.provider || typeof Story.ai.provider.narrate !== 'function') {
     Story.setAIStatus('fallback', { code: 'NO_API_CONFIG', message: 'AI 已开启，但缺少可用 Provider。' }); return null;
   }
@@ -2876,8 +3817,8 @@ Story.requestNarration = async function (ctx) {
     const timer = setTimeout(function () { if (!done) { done = true; resolve({ ok: false, code: 'TIMEOUT', error: '请求超过 ' + Story.ai.timeoutMs + 'ms' }); } }, Story.ai.timeoutMs);
     Promise.resolve(pending).then(function (v) { if (!done) { done = true; clearTimeout(timer); resolve({ ok: true, value: v }); } }, function (err) { if (!done) { done = true; clearTimeout(timer); resolve({ ok: false, code: Story.Provider._classifyError(err && err.message), error: err && err.message }); } });
   });
-  if (!outcome.ok) { Story.setAIStatus('fallback', { code: outcome.code, message: outcome.code === 'TIMEOUT' ? 'API 请求超时，已使用AI 文本生成失败，本回合裁决已保留，等待重试。。' : 'API 请求失败，已使用AI 文本生成失败，本回合裁决已保留，等待重试。。', error: outcome.error, lastRequestAt: requestedAt }); return null; }
-  if (!outcome.value) { Story.setAIStatus('fallback', { code: 'EMPTY_RESPONSE', message: 'API 返回空内容，已使用AI 文本生成失败，本回合裁决已保留，等待重试。。', lastRequestAt: requestedAt }); return null; }
+  if (!outcome.ok) { Story.setAIStatus('fallback', { code: outcome.code, message: outcome.code === 'TIMEOUT' ? 'API 请求超时，本回合裁决已保留，等待重试。' : 'API 请求失败，本回合裁决已保留，等待重试。', error: outcome.error, lastRequestAt: requestedAt }); return null; }
+  if (!outcome.value) { Story.setAIStatus('fallback', { code: 'EMPTY_RESPONSE', message: 'API 返回空内容，本回合裁决已保留，等待重试。', lastRequestAt: requestedAt }); return null; }
   Story.setAIStatus('received', { message: '已收到 API 响应，正在校验。', lastRequestAt: requestedAt });
   return outcome.value;
 };
@@ -2898,7 +3839,7 @@ Story.requestValidatedChapter = async function (ctx, state) {
       Story.setAIStatus('received', { message: '检测到格式偏差，自动修复格式后重试。', errors: errors });
       raw = JSON.stringify({ title: parsed.title || '', chapter: parsed.chapter || '', dialogues: parsed.dialogues || [], endingImage: parsed.endingImage || null });
     } else {
-      Story.setAIStatus('fallback', { code: 'INVALID_SCHEMA', message: 'AI 返回字段不合规，已使用AI 文本生成失败，本回合裁决已保留，等待重试。。', errors: errors });
+      Story.setAIStatus('fallback', { code: 'INVALID_SCHEMA', message: 'AI 返回字段不合规，本回合裁决已保留，等待重试。', errors: errors });
       return null;
     }
   }

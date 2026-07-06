@@ -63,9 +63,21 @@ async function main() {
   check('三名机器人都有立命数据', room && room.seats.slice(1).every(function (s) { return !!s.actorSetup; }));
   check('开局按钮已启用', document.getElementById('btn-lobby-start').disabled === false);
   document.getElementById('btn-lobby-start').click();
-  await new Promise(function (resolve) { setTimeout(resolve, 200); });
-  check('点击开局后进入游戏屏', document.getElementById('screen-game').classList.contains('active'));
-  check('点击开局后生成第一章', !!room.storySession && !!room.storySession.story.currentChapter);
+  await new Promise(function (resolve) { setTimeout(resolve, 500); });
+  // V3.3.2：开局后进入命途签投票界面
+  check('点击开局后进入命途签投票', document.getElementById('screen-arc-voting').classList.contains('active'));
+  // 点击第一张候选卡
+  var arcCards = document.querySelectorAll('.arc-candidate-card');
+  check('命途签有三张候选卡', arcCards.length === 3, '实际=' + arcCards.length);
+  if (arcCards.length > 0) {
+    arcCards[0].click();
+    await new Promise(function (resolve) { setTimeout(resolve, 100); });
+    // 确认投票
+    document.getElementById('btn-arc-confirm').click();
+    await new Promise(function (resolve) { setTimeout(resolve, 500); });
+  }
+  check('投票后进入游戏屏', document.getElementById('screen-game').classList.contains('active'));
+  check('投票后生成第一章', !!room.storySession && !!room.storySession.story.currentChapter);
   check('页面无脚本加载错误', errors.length === 0, errors.join(' | '));
 
   dom.window.close();

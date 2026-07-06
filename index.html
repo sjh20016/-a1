@@ -266,6 +266,50 @@ input,textarea,select{font-family:inherit;color:var(--text)}
   .chapter-text{font-size:15px;line-height:2}
   .drawer{width:100vw}
 }
+
+/* ============================ V3.3.2 命途签投票 ============================ */
+#screen-arc-voting{min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:30px 18px 40px}
+.arc-vote-title{font-size:28px;font-weight:800;color:var(--gold);letter-spacing:4px;margin-bottom:4px;text-align:center}
+.arc-vote-sub{font-size:13px;color:var(--text-dim);letter-spacing:2px;margin-bottom:24px;text-align:center}
+.arc-candidate-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;max-width:900px;width:100%;margin-bottom:20px}
+.arc-candidate-card{background:var(--card-bg);border:2px solid var(--border);border-radius:12px;padding:18px 16px;cursor:pointer;transition:all .2s;display:flex;flex-direction:column;gap:10px;position:relative}
+.arc-candidate-card:hover{border-color:var(--border-strong);transform:translateY(-2px)}
+.arc-candidate-card.selected{border-color:var(--gold);box-shadow:0 0 18px rgba(200,164,92,.2)}
+.arc-candidate-card .arc-family{font-size:11px;padding:2px 8px;border-radius:10px;letter-spacing:1px;display:inline-block;align-self:flex-start}
+.arc-candidate-card .arc-family.mystery{color:var(--cyan);border:1px solid rgba(78,205,196,.3)}
+.arc-candidate-card .arc-family.intrigue{color:var(--purple);border:1px solid rgba(123,94,167,.3)}
+.arc-candidate-card .arc-family.conflict{color:var(--red);border:1px solid rgba(224,86,86,.3)}
+.arc-candidate-card .arc-family.exploration{color:var(--green);border:1px solid rgba(91,168,140,.3)}
+.arc-candidate-card .arc-title{font-size:18px;font-weight:700;color:var(--text)}
+.arc-candidate-card .arc-pitch{font-size:13px;color:var(--text-dim);line-height:1.6;flex:1}
+.arc-candidate-card .arc-tags{display:flex;gap:6px;flex-wrap:wrap}
+.arc-candidate-card .arc-tags span{font-size:11px;padding:2px 8px;border-radius:8px;background:rgba(0,0,0,.3);color:var(--text-dim);border:1px solid var(--border)}
+.arc-vote-selected{font-size:12px;color:var(--gold);margin-top:4px}
+.arc-vote-status{max-width:900px;width:100%;margin-bottom:20px;display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+.arc-vote-status .vs-seat{font-size:12px;padding:4px 12px;border-radius:10px;border:1px solid var(--border);color:var(--text-dim)}
+.arc-vote-status .vs-seat.voted{color:var(--green);border-color:rgba(91,168,140,.4)}
+.arc-vote-status .vs-seat.waiting{color:var(--text-faint)}
+.arc-vote-actions{display:flex;gap:14px;flex-wrap:wrap;justify-content:center}
+/* 卷纲抽屉 */
+.arc-drawer{display:none;position:fixed;bottom:0;left:0;right:0;background:var(--card-bg);border-top:1px solid var(--border-strong);z-index:50;padding:12px 16px}
+.arc-drawer.show{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:center}
+.arc-drawer .ad-title{font-size:14px;font-weight:700;color:var(--gold);white-space:nowrap}
+.arc-drawer .ad-beat{font-size:12px;color:var(--text-dim)}
+.arc-drawer .ad-clock{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-faint)}
+.arc-drawer .ad-clock-bar{width:60px;height:6px;background:rgba(0,0,0,.3);border-radius:3px;overflow:hidden}
+.arc-drawer .ad-clock-fill{height:100%;background:var(--red);border-radius:3px;transition:width .3s}
+.arc-drawer .ad-toggle{font-size:12px;color:var(--cyan);cursor:pointer;border:none;background:none}
+/* 卷纲详情面板 */
+.arc-detail{display:none;position:fixed;bottom:48px;left:0;right:0;background:var(--card-bg);border-top:1px solid var(--border-strong);z-index:49;padding:16px 18px;max-height:40vh;overflow-y:auto}
+.arc-detail.show{display:block}
+.arc-detail .ad-section{margin-bottom:12px}
+.arc-detail .ad-section h4{font-size:13px;color:var(--gold);margin-bottom:4px}
+.arc-detail .ad-section p{font-size:12px;color:var(--text-dim);line-height:1.6}
+.arc-detail .ad-beat-list{display:flex;flex-direction:column;gap:6px}
+.arc-detail .ad-beat-item{font-size:12px;padding:6px 10px;border-radius:6px;background:rgba(0,0,0,.2);border:1px solid var(--border)}
+.arc-detail .ad-beat-item.done{opacity:.6;text-decoration:line-through}
+.arc-detail .ad-beat-item.active{border-color:var(--gold);color:var(--gold)}
+.arc-detail .ad-beat-item.shattered{border-color:var(--red);color:var(--red)}
 </style>
 </head>
 <body>
@@ -522,7 +566,22 @@ input,textarea,select{font-family:inherit;color:var(--text)}
   <div class="drawer-body" id="drawer-body"></div>
 </div>
 
-<!-- ============== 设置弹窗 ============== -->
+<!-- ============== V3.3.2 命途签投票 ============== -->
+<div class="screen" id="screen-arc-voting">
+  <div class="arc-vote-title">三签择一</div>
+  <div class="arc-vote-sub">选择一卷命途，它将决定这局世界的走向与暗流。</div>
+  <div class="arc-candidate-grid" id="arc-candidate-grid"></div>
+  <div class="arc-vote-status" id="arc-vote-status"></div>
+  <div class="arc-vote-actions">
+    <button class="btn primary" id="btn-arc-confirm" disabled>确认投票</button>
+  </div>
+  <div class="lobby-loading" id="arc-finalizing" style="display:none">
+    <div class="spinner"></div>
+    <div class="ll-text">正在结算命途签……</div>
+  </div>
+</div>
+
+<!-- ============== 游戏界面 ============== -->
 <div class="modal-overlay" id="set-modal">
   <div class="modal">
     <h3>设置 · AI 与叙事</h3>
@@ -572,6 +631,28 @@ input,textarea,select{font-family:inherit;color:var(--text)}
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- V3.3.2 卷纲抽屉 -->
+<div class="arc-drawer" id="arc-drawer">
+  <span class="ad-title" id="ad-title">—</span>
+  <span class="ad-beat" id="ad-beat">—</span>
+  <span class="ad-clock" id="ad-clock"></span>
+  <button class="ad-toggle" id="ad-toggle" title="展开卷纲详情">展开 ▾</button>
+</div>
+<div class="arc-detail" id="arc-detail">
+  <div class="ad-section">
+    <h4>当前卷纲</h4>
+    <p id="ad-arc-name">—</p>
+  </div>
+  <div class="ad-section">
+    <h4>节拍</h4>
+    <div class="ad-beat-list" id="ad-beat-list"></div>
+  </div>
+  <div class="ad-section">
+    <h4>压力</h4>
+    <p id="ad-clocks">—</p>
+  </div>
+</div>
 
 <script src="game-core.js?v=3.3.0"></script>
 <script src="story-core.js?v=3.3.0"></script>
@@ -634,6 +715,159 @@ UI.randomizeSetup = function () {
   document.getElementById('su-wish').value = setup.publicWish;
   document.getElementById('su-fate').value = setup.hiddenFate;
 };
+
+/* ---------- V3.3.2 命途签投票 UI ---------- */
+UI._arcSelected = null;
+
+/** 渲染命途签投票界面 */
+UI.renderArcVoting = function (room) {
+  UI.switchScreen('arc-voting');
+  UI.room = room;
+  var dv = room.directorVote;
+  var candidates = dv.candidates || [];
+  var grid = document.getElementById('arc-candidate-grid');
+  grid.innerHTML = '';
+  UI._arcSelected = null;
+  // 检查当前席位是否已投票
+  var mySeat = room.seats.find(function (s) { return s.seatId === UI.viewerSeatId; });
+  var myVote = mySeat ? dv.votesBySeatId[mySeat.seatId] : null;
+  candidates.forEach(function (c) {
+    var famClasses = { mystery: 'mystery', intrigue: 'intrigue', conflict: 'conflict', exploration: 'exploration' };
+    var famLabel = { mystery: '谜团', intrigue: '权谋', conflict: '势力', exploration: '探索' };
+    var card = document.createElement('div');
+    card.className = 'arc-candidate-card' + (myVote === c.arcId ? ' selected' : '');
+    card.setAttribute('data-arc-id', c.arcId);
+    card.innerHTML =
+      '<span class="arc-family ' + (famClasses[c.family] || '') + '">' + (famLabel[c.family] || c.family) + '</span>' +
+      '<div class="arc-title">' + UI.esc(c.title) + '</div>' +
+      '<div class="arc-pitch">' + UI.esc(c.publicPitch) + '</div>' +
+      '<div class="arc-tags">' + (c.tags || []).map(function (t) { return '<span>' + UI.esc(t) + '</span>'; }).join('') + '</div>' +
+      (myVote === c.arcId ? '<div class="arc-vote-selected">你已投票</div>' : '');
+    card.addEventListener('click', function () {
+      UI._arcSelected = c.arcId;
+      grid.querySelectorAll('.arc-candidate-card').forEach(function (el) { el.classList.remove('selected'); });
+      card.classList.add('selected');
+      document.getElementById('btn-arc-confirm').disabled = false;
+    });
+    grid.appendChild(card);
+  });
+  // 渲染投票状态
+  UI.renderArcVoteStatus(room);
+  // 确认按钮
+  document.getElementById('btn-arc-confirm').disabled = !myVote;
+  document.getElementById('btn-arc-confirm').onclick = function () {
+    if (!UI._arcSelected) return;
+    UI.submitArcVote(UI._arcSelected);
+  };
+};
+
+/** 渲染投票状态 */
+UI.renderArcVoteStatus = function (room) {
+  var statusEl = document.getElementById('arc-vote-status');
+  var dv = room.directorVote;
+  var html = '';
+  room.seats.forEach(function (s) {
+    if (s.kind === 'empty') return;
+    var voted = dv.votesBySeatId[s.seatId] !== undefined;
+    var arc = voted ? (dv.candidates || []).find(function (c) { return c.arcId === dv.votesBySeatId[s.seatId]; }) : null;
+    html += '<span class="vs-seat ' + (voted ? 'voted' : 'waiting') + '">' +
+      UI.esc(s.displayName) + (voted ? '：已投票' : '：等待中') +
+      '</span>';
+  });
+  statusEl.innerHTML = html;
+};
+
+/** 提交命途签投票 */
+UI.submitArcVote = async function (arcId) {
+  if (!UI.room || !UI.viewerSeatId) return;
+  try {
+    Room.coordinator.submitArcVote(UI.room.roomId, UI.viewerSeatId, arcId);
+    UI.renderArcVoteStatus(UI.room);
+    document.getElementById('btn-arc-confirm').disabled = true;
+    // 检查是否全员投票
+    var humanSeats = UI.room.seats.filter(function (s) { return s.kind === 'human'; });
+    var allVoted = humanSeats.every(function (s) {
+      return UI.room.directorVote.votesBySeatId[s.seatId] !== undefined;
+    });
+    if (allVoted) {
+      await UI.finalizeArcVote();
+    }
+  } catch (e) {
+    UI.toast('投票失败：' + e.message);
+  }
+};
+
+/** 结算命途签投票 */
+UI.finalizeArcVote = async function () {
+  document.getElementById('arc-finalizing').style.display = '';
+  try {
+    await Room.coordinator.finalizeArcVote(UI.room.roomId, UI.viewerSeatId);
+    document.getElementById('arc-finalizing').style.display = 'none';
+    var winner = UI.room.directorVote.selectedArcId;
+    var candidate = (UI.room.directorVote.candidates || []).find(function (c) { return c.arcId === winner; });
+    UI.toast('本卷命途已定：' + (candidate ? candidate.title : ''));
+    UI.switchScreen('game');
+    UI.renderChapter();
+  } catch (e) {
+    document.getElementById('arc-finalizing').style.display = 'none';
+    UI.toast('结算失败：' + e.message);
+  }
+};
+
+/* ---------- V3.3.2 卷纲抽屉 UI ---------- */
+
+/** 渲染卷纲抽屉 */
+UI.renderArcDrawer = function () {
+  var state = UI.room ? (UI.room.storySession || null) : (Story.state || null);
+  if (!state) return;
+  var d = state.story.director;
+  var arc = d && d.activeArc;
+  var drawer = document.getElementById('arc-drawer');
+  if (!arc || arc.status === 'completed') {
+    drawer.classList.remove('show');
+    document.getElementById('arc-detail').classList.remove('show');
+    return;
+  }
+  drawer.classList.add('show');
+  document.getElementById('ad-title').textContent = arc.title;
+  // 当前节拍
+  var beat = (arc.beats || [])[arc.currentBeatIndex];
+  document.getElementById('ad-beat').textContent = beat ? beat.title : '—';
+  // 压力时钟
+  var clockEl = document.getElementById('ad-clock');
+  var clocks = arc.pressureClocks || [];
+  clockEl.innerHTML = clocks.map(function (c) {
+    var pct = Math.round((c.current / c.max) * 100);
+    return '<span>' + c.label + '</span><div class="ad-clock-bar"><div class="ad-clock-fill" style="width:' + pct + '%"></div></div>';
+  }).join('');
+  // 详情面板
+  document.getElementById('ad-arc-name').textContent = arc.title + ' · ' + (arc.tags || []).join(' / ');
+  var beatList = document.getElementById('ad-beat-list');
+  beatList.innerHTML = (arc.beats || []).map(function (b) {
+    var cls = 'ad-beat-item';
+    if (b.status === 'completed') cls += ' done';
+    else if (b.status === 'active') cls += ' active';
+    else if (b.status === 'shattered') cls += ' shattered';
+    return '<div class="' + cls + '">' + UI.esc(b.title) + ' · ' + UI.esc(b.dramaticGoal || '') + '</div>';
+  }).join('');
+  document.getElementById('ad-clocks').textContent = clocks.map(function (c) {
+    return c.label + '：' + c.current + '/' + c.max;
+  }).join(' | ');
+};
+
+// 卷纲抽屉切换事件
+document.addEventListener('DOMContentLoaded', function () {
+  setTimeout(function () {
+    var toggle = document.getElementById('ad-toggle');
+    if (toggle) {
+      toggle.addEventListener('click', function () {
+        var detail = document.getElementById('arc-detail');
+        detail.classList.toggle('show');
+        toggle.textContent = detail.classList.contains('show') ? '收起 ▴' : '展开 ▾';
+      });
+    }
+  }, 100);
+});
 
 UI.startGame = async function () {
   // The legacy quick-solo path must not inherit a room left by a previous
@@ -1701,17 +1935,16 @@ UI.startRoom = async function () {
   var btn = document.getElementById('btn-lobby-start');
   var loading = document.getElementById('lobby-loading');
   try {
-    // 在大厅显示加载遮罩（showComputing 操作的是游戏屏元素，大厅看不到）
     if (btn) { btn.disabled = true; btn.textContent = '正在开局……'; }
     if (loading) loading.style.display = 'flex';
-    await Room.transport.send({ type: 'startRoom', roomId: UI.room.roomId });
+    // V3.3.2：使用带卷纲投票的开局流程
+    await Room.coordinator.startRoomWithArcVoting(UI.room.roomId);
     UI._lastRoomRound = UI.room.turn.round;
-    UI.switchScreen('game');
-    UI.renderChapter();
+    // 进入命途签投票界面
+    UI.renderArcVoting(UI.room);
   } catch (e) {
     UI.toast('开局失败：' + e.message);
     console.error('startRoom failed:', e);
-    // 恢复大厅按钮
     if (btn) { btn.textContent = '开局'; }
     UI.updateLobbyStart();
   } finally {
@@ -1762,6 +1995,8 @@ UI.renderRoomChapter = function () {
   UI.renderChoices();
   UI.renderLegacy();
   UI.renderNarrationBlocked();
+  // V3.3.2：卷纲抽屉
+  UI.renderArcDrawer();
 };
 
 UI.renderRoomChoices = function () {

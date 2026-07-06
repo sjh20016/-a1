@@ -187,10 +187,20 @@ function ok(name, cond, extra) {
   ok('修改立命后房主仍已准备', document.querySelector('.seat-card.host.ready') !== null);
   ok('修改立命后开局按钮仍启用', !document.getElementById('btn-lobby-start').disabled);
 
-  // 14. 开局 → 游戏屏
+  // 14. 开局 → 命途签投票 → 游戏屏
   document.getElementById('btn-lobby-start').dispatchEvent(new window.Event('click'));
-  await new Promise(function (r) { setTimeout(r, 60); });
-  ok('开局后进入游戏屏', document.getElementById('screen-game').classList.contains('active'));
+  await new Promise(function (r) { setTimeout(r, 200); });
+  // V3.3.2：命途签投票界面
+  ok('开局后进入命途签投票', document.getElementById('screen-arc-voting').classList.contains('active'));
+  var arcCards = document.querySelectorAll('.arc-candidate-card');
+  ok('有三张候选命途签', arcCards.length === 3);
+  // 点击第一张命途签
+  arcCards[0].dispatchEvent(new window.Event('click'));
+  // 确认投票
+  document.getElementById('btn-arc-confirm').disabled = false;
+  document.getElementById('btn-arc-confirm').dispatchEvent(new window.Event('click'));
+  await new Promise(function (r) { setTimeout(r, 120); });
+  ok('投票后进入游戏屏', document.getElementById('screen-game').classList.contains('active'));
   ok('房间第一章标题已渲染', document.getElementById('chapter-title').textContent.length > 0);
   ok('房间第一章正文已渲染', document.getElementById('chapter-text').children.length > 0);
   ok('房间玩家 A/B/C 选项已渲染', document.querySelectorAll('.choice-card').length === 3);

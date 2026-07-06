@@ -83,6 +83,16 @@ const Room = {};
         resolutionId: null,
         lastError: null,
       },
+      // V3.3.2 Director 投票
+      directorVote: {
+        phase: 'idle',                          // idle | voting | finalized
+        candidates: [],
+        votesBySeatId: {},
+        botVotesBySeatId: {},
+        openedAt: 0,
+        finalizedAt: 0,
+        selectedArcId: null,
+      },
       eventLog: [],
       _pending: null,                           // 进行中的结算 Promise（不入存档）
     };
@@ -279,7 +289,118 @@ const Room = {};
       }
     },
 
-    /** 真人提交行动（同步，若触发结算则异步进行，用 awaitPending 等待） */
+    /** V3.3.2：带卷纲投票的开局流程。
+     *  世界与角色生成 → 生成命途签候选 → 进入 arc_voting → 投票后激活卷纲 → 开局叙事 */
+    startRoomWithArcVoting: async function (roomId) {
+      var room = _requireRoom(roomId);
+      if (room.status !== 'lobby') throw new Error('房间已开始');
+      var occupied = room.seats.filter(function (s) { return s.kind === 'human' || s.kind === 'bot'; });
+      if (occupied.length < 2) throw new Error('至少需要 2 个非空席位');
+      if (!occupied.some(function (s) { return s.kind === 'human'; })) throw new Error('至少需要 1 名真人');
+      var notReady = occupied.filter(function (s) { return !s.ready; });
+      if (notReady.length) throw new Error('尚有席位未准备：' + notReady.map(function (s) { return s.displayName; }).join('、'));
+      var noActor = occupied.filter(function (s) { return !s.actorSetup; });
+      if (noActor.length) throw new Error('尚有席位未绑定角色：' + noActor.map(function (s) { return s.displayName; }).join('、'));
+
+      room.status = 'generating';
+      try {
+        var actors = occupied.map(function (s) {
+          return Object.assign({}, s.actorSetup, { seatId: s.seatId });
+        });
+        // 跳过开局生成，等待投票后激活
+        var storyState = await Story.createSession({
+          seed: room.settings.seed || undefined,
+          actors: actors,
+          narrativePace: room.settings.narrativePace,
+          skipOpening: true,
+        });
+        room.storySession = storyState;
+        occupied.forEach(function (s) {
+          var actor = storyState.actors.find(function (a) { return a.seatId === s.seatId; });
+          if (actor) s.actorId = actor.id;
+        });
+        // 生成命途签候选
+        var candidates = Story.Director.generateCandidates(storyState);
+        var d = storyState.story.director;
+        d.candidates = candidates;
+        d.phase = 'voting';
+        // 填充 directorVote
+        room.directorVote.phase = 'voting';
+        room.directorVote.candidates = candidates;
+        room.directorVote.openedAt = Date.now();
+        room.status = 'arc_voting';
+        // Bot 自动投票
+        var botSeats = occupied.filter(function (s) { return s.kind === 'bot'; });
+        botSeats.forEach(function (s) {
+          var vote = Story.DirectorVote.autoVoteForBot(storyState, s.actorId);
+          if (vote) {
+            Story.DirectorVote.submitVote(storyState, s.actorId, vote);
+            room.directorVote.botVotesBySeatId[s.seatId] = vote;
+            room.directorVote.votesBySeatId[s.seatId] = vote;
+          }
+        });
+        _logEvent(room, { type: 'ARC_VOTING_STARTED', visibility: 'public', payload: { candidateCount: candidates.length } });
+        return room;
+      } catch (e) {
+        room.status = 'lobby';
+        room.storySession = null;
+        occupied.forEach(function (s) { s.actorId = null; });
+        _logEvent(room, { type: 'ROOM_START_FAILED', visibility: 'host', payload: { error: e.message } });
+        throw e;
+      }
+    },
+
+    /** 提交卷纲投票（真人） */
+    submitArcVote: function (roomId, seatId, arcId) {
+      var room = _requireRoom(roomId);
+      if (room.status !== 'arc_voting') throw new Error('当前不在投票阶段');
+      var seat = room.seats.find(function (s) { return s.seatId === seatId; });
+      if (!seat || seat.kind !== 'human') throw new Error('只有真人席位可投票');
+      if (!seat.actorId) throw new Error('该席位未绑定角色');
+      var state = room.storySession;
+      if (!state) throw new Error('故事会话未创建');
+      Story.DirectorVote.submitVote(state, seat.actorId, arcId);
+      room.directorVote.votesBySeatId[seatId] = arcId;
+      _logEvent(room, { type: 'ARC_VOTE_SUBMITTED', visibility: 'host', payload: { seatId: seatId, arcId: arcId } });
+      return room;
+    },
+
+    /** 结算投票并激活卷纲 */
+    finalizeArcVote: async function (roomId, masterSeatId) {
+      var room = _requireRoom(roomId);
+      if (room.status !== 'arc_voting') throw new Error('当前不在投票阶段');
+      var state = room.storySession;
+      if (!state) throw new Error('故事会话未创建');
+      var d = state.story.director;
+      // 检查是否所有真人席位都已投票
+      var humanSeats = room.seats.filter(function (s) { return s.kind === 'human'; });
+      var allVoted = humanSeats.every(function (s) {
+        return room.directorVote.votesBySeatId[s.seatId] !== undefined;
+      });
+      if (!allVoted) throw new Error('尚有真人席位未投票');
+      // 房主可在平票时指定
+      var winner = Story.DirectorVote.finalizeVote(state);
+      room.directorVote.phase = 'finalized';
+      room.directorVote.finalizedAt = Date.now();
+      room.directorVote.selectedArcId = winner;
+      // 激活卷纲 → 生成开局场景与叙事
+      await Story.Director.finalizeSessionWithArc(state, winner);
+      // 正常开局流程
+      room.status = 'generating';
+      var openPhase = Story.getTurnPhase(state);
+      if (openPhase === 'awaiting_narration' || openPhase === 'narration_failed') {
+        room.status = 'narration_failed';
+        room.turn.phase = 'narration_failed';
+        var pr0 = Story.getPendingResolution(state);
+        var err0 = pr0 && pr0.lastNarrationError ? pr0.lastNarrationError : null;
+        room.turn.lastError = err0 ? ('天机未应：' + (err0.code || 'UNKNOWN') + ' — ' + (err0.message || '')) : '天机未应';
+      } else {
+        _openTurn(room);
+        room.status = 'collecting';
+      }
+      _logEvent(room, { type: 'ARC_VOTE_FINALIZED', visibility: 'public', payload: { selectedArcId: winner } });
+      return room;
+    },
     submitAction: function (roomId, seatId, action) {
       var room = _requireRoom(roomId);
       if (room.status !== 'collecting') throw new Error('当前不在收集阶段');
