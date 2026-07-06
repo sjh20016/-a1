@@ -3,6 +3,7 @@
  *       至少 2 种 category、validateChoiceSet 通过。
  */
 const Story = require('./story-core.js');
+const { setupMockAI } = require('./test-helpers.js');
 
 let pass = 0, fail = 0;
 function ok(name, cond, detail) {
@@ -11,6 +12,7 @@ function ok(name, cond, detail) {
 }
 
 async function main() {
+  setupMockAI(Story);
   var state = await Story.startGame('CH-TEST', {
     name: '陆知微', daoPath: '剑修',
     publicWish: '寻找失落剑经', hiddenFate: '残剑记得一个不存在的人名',

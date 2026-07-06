@@ -14,6 +14,7 @@
  */
 const Story = require('./story-core.js');
 const Room = require('./room-core.js');
+const { setupMockAI } = require('./test-helpers.js');
 
 let pass = 0, fail = 0;
 function ok(name, cond, extra) {
@@ -32,7 +33,7 @@ const playerSetup = function (name, daoPath) {
 };
 
 async function main() {
-  Story.setAIEnabled(false);
+  setupMockAI(Story);
 
   /* ============================================================
    * §1 房间创建与席位管理
@@ -276,7 +277,7 @@ async function main() {
    * §8 V3 存档迁移
    * ============================================================ */
   section('§8 迁移 · V3 单人存档迁移为 V3.1 房间');
-  Story.setAIEnabled(false);
+  setupMockAI(Story);
   const v3State = await Story.startGame('V3-MIGRATE-1', playerSetup('迁移者', '剑修'));
   const v3Save = Story.save();
   ok('V3 存档已生成', typeof v3Save === 'string' && v3Save.length > 0);

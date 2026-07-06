@@ -42,6 +42,19 @@ async function main() {
   check('Room 成功取得 Story 依赖', window.Room && window.Room.PRESET_BOT_ACTORS.length === 3,
     window.Room ? '预设角色数=' + window.Room.PRESET_BOT_ACTORS.length : 'Room 未加载');
 
+  // V3.3：开局事务化需要 AI，注册 mock provider（离线兜底已废除）
+  window.Story.setAIEnabled(true);
+  window.Story.registerAIProvider({
+    narrate: async function () {
+      return JSON.stringify({
+        title: '雨夜启程',
+        chapter: '雨落长街，剑气未散。众人立于檐下，听远处更鼓声声，心中各有计较。' +
+          '这一夜的变故，将原本平静的行程撕开一道口子，前路愈发难以预料。' +
+          '陆知微握紧腰间残剑，剑身微颤，似在回应夜色中某种未明的呼唤。',
+      });
+    },
+  }, { provider: 'mock', model: 'mock' });
+
   document.getElementById('seed-input').value = 'BROWSER-LOAD-REGRESSION';
   document.getElementById('btn-roll').click();
   document.getElementById('btn-create-room').click();
@@ -50,7 +63,7 @@ async function main() {
   check('三名机器人都有立命数据', room && room.seats.slice(1).every(function (s) { return !!s.actorSetup; }));
   check('开局按钮已启用', document.getElementById('btn-lobby-start').disabled === false);
   document.getElementById('btn-lobby-start').click();
-  await new Promise(function (resolve) { setTimeout(resolve, 80); });
+  await new Promise(function (resolve) { setTimeout(resolve, 200); });
   check('点击开局后进入游戏屏', document.getElementById('screen-game').classList.contains('active'));
   check('点击开局后生成第一章', !!room.storySession && !!room.storySession.story.currentChapter);
   check('页面无脚本加载错误', errors.length === 0, errors.join(' | '));

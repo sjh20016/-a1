@@ -62,6 +62,19 @@ function ok(name, cond, extra) {
   const Story = window.Story;
   const Room = window.Room;
 
+  // V3.3：开局事务化需要 AI，注册 mock provider（离线兜底已废除）
+  Story.setAIEnabled(true);
+  Story.registerAIProvider({
+    narrate: async function () {
+      return JSON.stringify({
+        title: '雨夜启程',
+        chapter: '雨落长街，剑气未散。众人立于檐下，听远处更鼓声声，心中各有计较。' +
+          '这一夜的变故，将原本平静的行程撕开一道口子，前路愈发难以预料。' +
+          '陆知微握紧腰间残剑，剑身微颤，似在回应夜色中某种未明的呼唤。',
+      });
+    },
+  }, { provider: 'mock', model: 'mock' });
+
   console.log('\n— V3 DOM 冒烟 —');
 
   // 1. 初始屏：开界仪式

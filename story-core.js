@@ -74,7 +74,10 @@ Story.createRng = function (seed, sub) {
  * §1 常量：七枚开界骰 / 地貌 / 天道 / 人格 / AI 同伴模板
  * ============================================================ */
 
-Story.VERSION = '3.2.0';
+Story.VERSION = '3.3.0';
+
+/** V3.3 回合状态机阶段（Narration Transaction） */
+Story.TURN_PHASES = ['collecting', 'locked', 'resolving', 'awaiting_narration', 'published'];
 
 Story.ORIGIN_DICE = {
   era:            ['盛世', '衰世', '末法', '天倾前夜'],
@@ -217,6 +220,7 @@ Story.createEmptyState = function () {
       regions: [],
     },
     actors: [],
+    assets: [],                       // V3.3 Phase 3：AssetRegistry 资产登记表
     story: {
       chapterIndex: 0,
       currentChapter: null,
@@ -231,6 +235,9 @@ Story.createEmptyState = function () {
       recentChoiceFingerprints: [],
       recentChapterFingerprints: [],
       lastTurnRecordId: null,
+      // V3.3 Narration Transaction：回合状态机 + 待提交裁决包
+      turnPhase: 'collecting',     // collecting|locked|resolving|awaiting_narration|published
+      pendingResolution: null,     // {turnId,envelope,actionsByActorId,botActions,sceneBefore,chapterIndexBefore,createdAt,retryCount,lastNarrationError}
       // V3 兼容字段（仅作镜像，不承担真实逻辑）
       pendingChoices: {},
       aiPendingChoices: {},
@@ -286,6 +293,9 @@ Story.Migration.migrateToV32 = function (s) {
   if (!st.recentChoiceFingerprints) st.recentChoiceFingerprints = [];
   if (!st.recentChapterFingerprints) st.recentChapterFingerprints = [];
   if (!st.lastTurnRecordId) st.lastTurnRecordId = null;
+  // V3.3 Narration Transaction 字段
+  if (!st.turnPhase) st.turnPhase = 'collecting';
+  if (!st.pendingResolution) st.pendingResolution = null;
   // currentChapter 补 provenance
   if (st.currentChapter && !st.currentChapter.provenance) {
     st.currentChapter.provenance = 'legacy';
@@ -303,7 +313,16 @@ Story.Migration.migrateToV32 = function (s) {
     if (!a.relationships) a.relationships = Story.Delta._buildRelationMap(a, s.actors);
     if (!a.hidden) a.hidden = { realm: '炼气六层', cultivationProgress: 0, injury: 0, resources: [], combatStats: { body: 10, spirit: 10, soul: 10 } };
     if (!a.privateFacts) a.privateFacts = [];
+    // V3.3 Phase 2：每角色位置/在场状态
+    if (a.locationId === undefined) a.locationId = (st.currentScene && st.currentScene.locationId) || null;
+    if (!a.presence) a.presence = 'present';
+    // V3.3 Phase 4：命盘（旧存档无则补，按种子确定性）
+    if (!a.fatePlate && s.world && s.world.worldBible && s.world.seed) {
+      a.fatePlate = Story.CharacterGenesis.rollFatePlate(s.world.seed, a, s.world.worldBible);
+    }
   });
+  // V3.3 Phase 3：AssetRegistry 资产登记表
+  if (!s.assets) s.assets = [];
   // 旧 activeThreads（字符串）→ ThreadState 最小对象
   st.activeThreads = (st.activeThreads || []).map(function (t, i) {
     if (t && typeof t === 'object' && t.threadId) return t;
@@ -421,6 +440,50 @@ Story.buildWorldBible = function (roll) {
 Story.worldBibleFromV2Seed = function (seed) { return Story.buildWorldBible(Story.rollOrigin(seed)); };
 
 /* ============================================================
+ * §3.5 CharacterGenesis —— 命盘（V3.3 Phase 4）
+ * 世界骰只决定世界 bible；角色命盘由「种子 + 角色道途/性格」派生，
+ * 写入 actor.fatePlate，供 UI 天机全览展示，不影响本地裁决与 RNG 主流。
+ * ============================================================ */
+
+Story.CharacterGenesis = Story.CharacterGenesis || {};
+
+// 道途 → 本命星候选
+Story.CharacterGenesis._DAO_STARS = {
+  '剑修': ['破军', '七杀', '贪狼'],
+  '丹道': ['天机', '太阴', '廉贞'],
+  '阵法': ['武曲', '天府', '巨门'],
+  '游侠': ['天相', '天梁', '擎羊'],
+  '妖修': ['贪狼', '廉贞', '七杀'],
+};
+
+Story.CharacterGenesis._KARMIC = ['旧约未了', '残魂寄剑', '血契反噬', '前世寻人', '断缘重续', '债主临门'];
+Story.CharacterGenesis._MERIDIAN = ['剑脉隐动', '药灵暗通', '阵骨自鸣', '魂脉残缺', '灵根含煞', '凡体藏锋'];
+Story.CharacterGenesis._CURVE = ['先抑后扬', '先扬后抑', '平中见奇', '坎坷渐通', '晚成之相', '危中藏机'];
+
+/** 掷出角色命盘（确定性：同 seed + 同 actor.id → 同命盘，独立 RNG 流不污染主流）。 */
+Story.CharacterGenesis.rollFatePlate = function (seed, actor, worldBible) {
+  const rng = Story.createRng(seed, 'genesis:' + (actor && (actor.id || actor.name) || 'x'));
+  const dao = (actor && actor.daoPath) || '剑修';
+  const stars = Story.CharacterGenesis._DAO_STARS[dao] || Story.CharacterGenesis._DAO_STARS['剑修'];
+  const fateNumber = 1 + Math.floor(rng.next() * 9); // 1-9
+  return {
+    originStar:     rng.pick(stars),
+    karmicThread:   rng.pick(Story.CharacterGenesis._KARMIC),
+    hiddenMeridian: rng.pick(Story.CharacterGenesis._MERIDIAN),
+    fateNumber:     fateNumber,
+    lifeCurve:      rng.pick(Story.CharacterGenesis._CURVE),
+    derivedAt:      (worldBible && worldBible.era) || '未知',
+    gravityTag:     (worldBible && worldBible.gravityTag) || null,
+  };
+};
+
+/** 命盘 → 公开可见的简短回响（不泄露私密，供 UI 角色卡展示）。 */
+Story.CharacterGenesis.publicEcho = function (plate) {
+  if (!plate) return '';
+  return '本命' + plate.originStar + '·命数' + plate.fateNumber + '·' + plate.lifeCurve;
+};
+
+/* ============================================================
  * §4 角色建立
  * ============================================================ */
 
@@ -428,7 +491,8 @@ Story.createActor = function (setup, storyState) {
   setup = setup || {};
   const id = setup.id || ('actor_' + Math.floor(Story.rngFor('event', storyState).next() * 1e6).toString(36));
   const relations = Story.Delta._buildRelationMap({ startingRelation: setup.startingRelation || setup.relationHints, id: id }, (storyState && storyState.actors) || []);
-  return {
+  const sceneLoc = (storyState && storyState.story && storyState.story.currentScene && storyState.story.currentScene.locationId) || null;
+  const actor = {
     id: id,
     seatId: setup.seatId || null,
     controller: setup.controller || null,
@@ -448,7 +512,17 @@ Story.createActor = function (setup, storyState) {
     privateFacts: [],
     hidden: { realm: '炼气六层', cultivationProgress: 0, injury: 0, resources: [], combatStats: { body: 10, spirit: 10, soul: 10 } },
     choicePrefs: setup.choicePrefs || null,
+    // V3.3 Phase 2：每角色位置/在场状态（共享场景下 Bot 移动不重写全员位置）
+    locationId: setup.locationId || sceneLoc || null,
+    presence: setup.presence || 'present',   // 'present' | 'away'
+    // V3.3 Phase 4：角色命盘
+    fatePlate: setup.fatePlate || null,
   };
+  // 命盘：若未提供且世界 bible 已就绪，则按种子确定性生成（独立 RNG 流）
+  if (!actor.fatePlate && storyState && storyState.world && storyState.world.worldBible && storyState.world.seed) {
+    actor.fatePlate = Story.CharacterGenesis.rollFatePlate(storyState.world.seed, actor, storyState.world.worldBible);
+  }
+  return actor;
 };
 
 Story.createPresetCompanions = function () {
@@ -496,124 +570,92 @@ Story.startGame = async function (seed, playerSetup) {
   return Story.createSession({ seed: seed, actors: [player].concat(companions) });
 };
 
-/** 生成开局：创建场景 → 开局裁决 → 开局选项 → AI/离线叙事 */
+/** 生成开局（V3.3 事务化）：创建场景 → 开局裁决 → 开局选项 → pendingResolution → awaiting_narration → AI → 提交。AI 失败停在 awaiting_narration，不调用离线兜底。 */
 Story._generateOpening = async function (state) {
   // 1. 创建开局场景与初始线索
   state.story.currentScene = Story.Scene.createOpeningScene(state);
   state.story.activeThreads = Story.Scene.createOpeningThreads(state);
 
-  // 2. 开局裁决（不依赖玩家行动，建立初始局面）
+  // 2. 开局裁决（不依赖玩家行动，建立初始局面）—— 纯计算，不应用
   const envelope = Story.Resolver.buildOpeningEnvelope(state);
 
-  // 3. 应用裁决（写账本/场景/时间）
-  Story.Delta.applyEnvelope(state, envelope);
-
-  // 4. 生成开局选项
-  const choices = Story.ChoiceFactory.buildAll(state, state.story.currentScene, envelope);
-  Story._writeChoices(state, choices);
-
-  // 5. 叙事
-  const brief = Story.Narration.buildBrief(state, state.story.currentScene, envelope);
-  let narration = null;
-  if (Story.ai.enabled) narration = await Story.Provider.narrate(state, brief);
-  let chapter;
-  if (narration && narration.title && narration.chapter) {
-    chapter = Story.Narration.assembleFromAI(state, state.story.currentScene, envelope, narration);
-  } else {
-    chapter = Story.Narration.assembleOffline(state, state.story.currentScene, envelope);
-  }
-  Story.Narration.applyNarration(state, chapter, envelope, true);
-  Story.appendChronicle(state, state.story.currentChapter.chapterSummary);
-  Story.snapshotRng(state);
-};
-
-/* ============================================================
- * §6 回合流程：resolveTurn（主入口）/ playTurn（V3 兼容包装）
- * ============================================================ */
-
-/**
- * 结算一回合（V3.2 本地裁决优先）。
- *   收集行动 → Intent 归一 → Bot 行动 → Resolver → Delta.apply →
- *   Scene.composeNext → ChoiceFactory → Narration.buildBrief → Provider.narrate →
- *   validateNarrationOnly → applyNarration → 写入 TurnRecord
- */
-Story.resolveTurn = async function (storyState, actionsByActorId) {
-  if (!storyState || !storyState.story.currentChapter) throw new Error('尚未开局');
-  Story._activateState(storyState);
-  actionsByActorId = actionsByActorId || {};
-  const state = storyState;
-  const s = state.story;
-  const rng = Story.rngFor('event', state);
-  const chapterIndexBefore = s.chapterIndex;
-  const sceneBefore = Story._clone(s.currentScene);
-
-  // 1. 归一化所有已提交行动为 Intent
-  const intents = [];
-  Object.keys(actionsByActorId).forEach(function (actorId) {
-    const action = actionsByActorId[actorId];
-    const actor = state.actors.find(function (a) { return a.id === actorId; });
-    if (!actor) return;
-    intents.push(Story.Intent.normalize(state, actorId, action));
-  });
-
-  // 2. 收集 Bot 行动（未在 actionsByActorId 中的非玩家控制角色）
-  state.actors.forEach(function (actor) {
-    if (intents.some(function (i) { return i.actorId === actor.id; })) return;
-    if (Story._isHumanActor(state, actor)) return;
-    const choices = Story.getChoicesForActor(state, actor.id);
-    if (!choices.length) return;
-    const chosen = Story.Agent.chooseAction(state, actor.id, choices, s.currentScene, null);
-    if (chosen) {
-      s.aiChosenLastTurn[actor.id] = chosen.id;
-      intents.push(Story.Intent.fromChoice(state, actor.id, chosen.id));
-    }
-  });
-
-  // 3. 本地裁决
-  const envelope = Story.Resolver.resolveTurn(state, intents);
-
-  // 4. 诊断（开发模式严格，生产模式安全回退）
+  // 3. 诊断（生产安全回退，开发模式抛错）
   const diag = Story.Diagnostics.validateResolutionEnvelope(envelope, state);
   if (!diag.ok) {
-    if (state.settings && state.settings.developerMode) throw new Error('ResolutionEnvelope 校验失败：' + diag.errors.join('；'));
+    if (state.settings && state.settings.developerMode) throw new Error('开局 ResolutionEnvelope 校验失败：' + diag.errors.join('；'));
     Story.Resolver._applySafeFallback(envelope, diag.errors);
   }
 
-  // 5. 应用裁决（写账本/线程/关系/时间）
+  // 4. 进入 awaiting_narration：世界状态零变化，存 pendingResolution
+  Story._setTurnPhase(state, 'awaiting_narration');
+  state.story.pendingResolution = {
+    turnId: 'turn_opening',
+    envelope: envelope,
+    actionsByActorId: {},
+    botActions: {},
+    sceneBefore: Story._clone(state.story.currentScene),
+    chapterIndexBefore: state.story.chapterIndex,
+    createdAt: Date.now(),
+    retryCount: 0,
+    lastNarrationError: null,
+  };
+
+  // 5. 调 AI 叙事
+  const brief = Story.Narration.buildBrief(state, state.story.currentScene, envelope);
+  const narration = Story.ai.enabled ? await Story.Provider.narrate(state, brief) : null;
+
+  if (!narration || !narration.title || !narration.chapter) {
+    // AI 失败：停在 awaiting_narration，不应用任何状态
+    const errCode = state.api.lastErrorCode || 'NO_API_CONFIG';
+    state.story.pendingResolution.lastNarrationError = {
+      code: errCode,
+      message: state.api.lastErrorMessage || (Story.ai.enabled ? 'AI 文本生成失败。' : 'AI 未配置，无法生成开局正文。'),
+      rawPreview: '',
+    };
+    return;
+  }
+
+  // 6. AI 成功：published —— 提交裁决 + 场景 + 选项 + 叙事
+  Story._commitPendingResolution(state, narration, true);
+};
+
+/**
+ * V3.3 提交 pendingResolution（开局/回合共用）。
+ * 执行：applyEnvelope → composeNext → buildAll → assembleFromAI → applyNarration → chronicle → TurnRecord → 清空 pendingResolution → 回 collecting。
+ */
+Story._commitPendingResolution = function (state, narration, isOpening) {
+  const s = state.story;
+  const pr = s.pendingResolution;
+  if (!pr) throw new Error('无 pendingResolution 可提交');
+  const envelope = pr.envelope;
+  Story._setTurnPhase(state, 'published');
+
+  // 1. 应用裁决
   Story.Delta.applyEnvelope(state, envelope);
-
-  // 6. 场景演化
-  s.currentScene = Story.Scene.composeNext(state, envelope);
-
-  // 7. 生成下一轮选项
+  // 2. 场景演化（开局：sceneBefore 已是开局场景，沿用；回合：composeNext）
+  if (isOpening) {
+    // 开局场景在 _generateOpening 中已创建，这里不覆盖
+  } else {
+    s.currentScene = Story.Scene.composeNext(state, envelope);
+  }
+  // 3. 生成下一轮选项
   const choices = Story.ChoiceFactory.buildAll(state, s.currentScene, envelope);
   Story._writeChoices(state, choices);
-
-  // 8. 叙事
-  const brief = Story.Narration.buildBrief(state, s.currentScene, envelope);
-  let narration = null;
-  if (Story.ai.enabled) narration = await Story.Provider.narrate(state, brief);
-  let chapter;
-  if (narration && narration.title && narration.chapter) {
-    chapter = Story.Narration.assembleFromAI(state, s.currentScene, envelope, narration);
-  } else {
-    chapter = Story.Narration.assembleOffline(state, s.currentScene, envelope);
-  }
-  Story.Narration.applyNarration(state, chapter, envelope, false);
-
-  // 9. 编年史
+  // 4. 叙事
+  const chapter = Story.Narration.assembleFromAI(state, s.currentScene, envelope, narration);
+  Story.Narration.applyNarration(state, chapter, envelope, !!isOpening);
+  // 5. 编年史
   Story.appendChronicle(state, s.currentChapter.chapterSummary);
-
-  // 10. 写入 TurnRecord
-  const turnId = 'turn_' + String(s.chapterIndex).padStart(4, '0');
+  // 6. 写入 TurnRecord
+  const turnId = pr.turnId;
   const turnRecord = {
     turnId: turnId,
-    chapterIndexBefore: chapterIndexBefore,
+    chapterIndexBefore: pr.chapterIndexBefore,
     chapterIndexAfter: s.chapterIndex,
-    submittedActions: Story._clone(actionsByActorId),
-    botActions: Object.keys(s.aiChosenLastTurn).reduce(function (o, k) { o[k] = s.aiChosenLastTurn[k]; return o; }, {}),
+    submittedActions: Story._clone(pr.actionsByActorId),
+    botActions: Story._clone(pr.botActions),
     resolutionEnvelope: Story._clone(envelope),
-    sceneBefore: sceneBefore,
+    sceneBefore: pr.sceneBefore,
     sceneAfter: Story._clone(s.currentScene),
     stateDeltaIds: (state.ledger.stateDeltas || []).slice(-envelope.publicDelta.length).map(function (d) { return d.op; }),
     narration: {
@@ -621,13 +663,175 @@ Story.resolveTurn = async function (storyState, actionsByActorId) {
       title: s.currentChapter.title,
       chapterHash: Story.hashSeed(s.currentChapter.chapter || ''),
       providerErrorCode: state.api.lastErrorCode,
+      retryCount: pr.retryCount,
     },
     createdAt: Date.now(),
   };
   state.ledger.turnRecords.push(turnRecord);
   s.lastTurnRecordId = turnId;
-
+  // 7. 清空 pendingResolution，回 collecting
+  s.pendingResolution = null;
+  Story._setTurnPhase(state, 'collecting');
   Story.snapshotRng(state);
+  return state;
+};
+
+/**
+ * V3.3 重试叙事（仅 awaiting_narration 可调用）。
+ * 复用同一 pendingResolution（envelope/botActions 不重算、不重选）。
+ * options.modelOverride / options.providerOverride 可选（换模型重试）。
+ * 软上限：retryCount >= 3 时 UI 提示但不阻止。
+ */
+Story.retryNarration = async function (storyState, options) {
+  options = options || {};
+  const state = storyState || Story.state;
+  if (!state) throw new Error('无活动 StoryState');
+  if (state.story.turnPhase !== 'awaiting_narration') {
+    throw new Error('当前回合阶段不可重试叙事：' + state.story.turnPhase);
+  }
+  const pr = state.story.pendingResolution;
+  if (!pr) throw new Error('无 pendingResolution，无法重试');
+  Story._activateState(state);
+
+  // 软上限提示（不阻止）
+  if (pr.retryCount >= 3) {
+    state.api.lastErrorMessage = (state.api.lastErrorMessage || '') + '（已重试 ' + pr.retryCount + ' 次，建议检查 API 配置或换模型。）';
+  }
+
+  // 换模型/Provider（可选）
+  if (options.modelOverride && Story.ai.setModel) {
+    try { Story.ai.setModel(options.modelOverride); } catch (e) {}
+  }
+
+  const isOpening = (pr.turnId === 'turn_opening');
+  const scene = isOpening ? pr.sceneBefore : state.story.currentScene;
+  const brief = Story.Narration.buildBrief(state, scene, pr.envelope);
+  const narration = Story.ai.enabled ? await Story.Provider.narrate(state, brief) : null;
+
+  if (!narration || !narration.title || !narration.chapter) {
+    // 仍失败：retryCount++，停在 awaiting_narration
+    pr.retryCount = (pr.retryCount || 0) + 1;
+    const errCode = state.api.lastErrorCode || 'NO_API_CONFIG';
+    pr.lastNarrationError = {
+      code: errCode,
+      message: state.api.lastErrorMessage || 'AI 文本生成失败。',
+      rawPreview: '',
+    };
+    return null;
+  }
+
+  // 成功：提交
+  return Story._commitPendingResolution(state, narration, isOpening);
+};
+
+/**
+ * V3.3 放弃当前裁决（边界 1A：resolving 异常时调用）。
+ * 回 collecting，保留 actionsByActorId + botActions，不清空 submittedActorIds。
+ * 玩家可"重试结算"（重新调 resolveTurn 重算 envelope）。
+ * 注意：bug 是确定性的会无限失败，但这是 bug，应被诊断。
+ */
+Story.abortResolution = function (storyState) {
+  const state = storyState || Story.state;
+  if (!state) return;
+  state.story.pendingResolution = null;
+  Story._setTurnPhase(state, 'collecting');
+};
+
+/* ============================================================
+ * §6 回合流程：resolveTurn（主入口）/ playTurn（V3 兼容包装）
+ * ============================================================ */
+
+/**
+ * 结算一回合（V3.3 Narration Transaction）。
+ *   collecting → locked → resolving（纯计算 envelope + Bot 决策）→ awaiting_narration（调 AI）→ published（提交）
+ *   AI 失败：停在 awaiting_narration，世界状态零变化，由 retryNarration 复用 pendingResolution 重试。
+ *   resolving 异常：调 abortResolution 回 collecting，保留 actionsByActorId + botActions，玩家可重试结算。
+ */
+Story.resolveTurn = async function (storyState, actionsByActorId) {
+  if (!storyState || !storyState.story.currentChapter) throw new Error('尚未开局');
+  Story._activateState(storyState);
+  actionsByActorId = actionsByActorId || {};
+  const state = storyState;
+  const s = state.story;
+  const chapterIndexBefore = s.chapterIndex;
+  const sceneBefore = Story._clone(s.currentScene);
+
+  // locked → resolving
+  Story._setTurnPhase(state, 'resolving');
+
+  let envelope, botActions;
+  try {
+    // 1. 归一化所有已提交行动为 Intent
+    const intents = [];
+    Object.keys(actionsByActorId).forEach(function (actorId) {
+      const action = actionsByActorId[actorId];
+      const actor = state.actors.find(function (a) { return a.id === actorId; });
+      if (!actor) return;
+      intents.push(Story.Intent.normalize(state, actorId, action));
+    });
+
+    // 2. 收集 Bot 行动（未在 actionsByActorId 中的非玩家控制角色）—— 一次锁定，不重选
+    botActions = {};
+    state.actors.forEach(function (actor) {
+      if (intents.some(function (i) { return i.actorId === actor.id; })) return;
+      if (Story._isHumanActor(state, actor)) return;
+      const choices = Story.getChoicesForActor(state, actor.id);
+      if (!choices.length) return;
+      const chosen = Story.Agent.chooseAction(state, actor.id, choices, s.currentScene, null);
+      if (chosen) {
+        s.aiChosenLastTurn[actor.id] = chosen.id;
+        botActions[actor.id] = chosen.id;
+        intents.push(Story.Intent.fromChoice(state, actor.id, chosen.id));
+      }
+    });
+
+    // 3. 本地裁决（纯计算，不应用）
+    envelope = Story.Resolver.resolveTurn(state, intents);
+
+    // 4. 诊断（开发模式严格，生产模式安全回退）
+    const diag = Story.Diagnostics.validateResolutionEnvelope(envelope, state);
+    if (!diag.ok) {
+      if (state.settings && state.settings.developerMode) throw new Error('ResolutionEnvelope 校验失败：' + diag.errors.join('；'));
+      Story.Resolver._applySafeFallback(envelope, diag.errors);
+    }
+  } catch (e) {
+    // resolving 异常：边界 1A —— 回 collecting，保留提交状态，玩家可重试结算
+    Story.abortResolution(state);
+    throw e;
+  }
+
+  // 5. awaiting_narration：世界状态冻结，存 pendingResolution
+  Story._setTurnPhase(state, 'awaiting_narration');
+  const turnId = 'turn_' + String(chapterIndexBefore + 1).padStart(4, '0');
+  state.story.pendingResolution = {
+    turnId: turnId,
+    envelope: envelope,
+    actionsByActorId: Story._clone(actionsByActorId),
+    botActions: botActions,
+    sceneBefore: sceneBefore,
+    chapterIndexBefore: chapterIndexBefore,
+    createdAt: Date.now(),
+    retryCount: 0,
+    lastNarrationError: null,
+  };
+
+  // 6. 调 AI 叙事
+  const brief = Story.Narration.buildBrief(state, s.currentScene, envelope);
+  const narration = Story.ai.enabled ? await Story.Provider.narrate(state, brief) : null;
+
+  if (!narration || !narration.title || !narration.chapter) {
+    // AI 失败：停在 awaiting_narration，不应用任何状态
+    const errCode = state.api.lastErrorCode || 'NO_API_CONFIG';
+    state.story.pendingResolution.lastNarrationError = {
+      code: errCode,
+      message: state.api.lastErrorMessage || 'AI 文本生成失败。',
+      rawPreview: '',
+    };
+    return state;
+  }
+
+  // 7. AI 成功：published —— 提交裁决 + 场景 + 选项 + 叙事
+  Story._commitPendingResolution(state, narration, false);
   return state;
 };
 
@@ -658,6 +862,30 @@ Story._writeChoices = function (state, choices) {
   state.story.aiPendingChoices = choices;
 };
 
+/** V3.3 设置回合阶段并同步快照 */
+Story._setTurnPhase = function (state, phase) {
+  if (Story.TURN_PHASES.indexOf(phase) < 0) throw new Error('非法回合阶段：' + phase);
+  state.story.turnPhase = phase;
+};
+
+/** V3.3 查询当前回合阶段 */
+Story.getTurnPhase = function (storyState) {
+  const s = storyState || Story.state;
+  return (s && s.story && s.story.turnPhase) || 'collecting';
+};
+
+/** V3.3 是否处于待叙事状态（AI 失败可重试） */
+Story.isAwaitingNarration = function (storyState) {
+  return Story.getTurnPhase(storyState) === 'awaiting_narration';
+};
+
+/** V3.3 获取待提交裁决包（诊断/UI 用，返回副本） */
+Story.getPendingResolution = function (storyState) {
+  const s = storyState || Story.state;
+  const pr = s && s.story && s.story.pendingResolution;
+  return pr ? Story._clone(pr) : null;
+};
+
 Story._isHumanActor = function (state, actor) {
   // V3.2 §S：禁止 state.actors.find(a => a.controller === 'human')。
   // 真人判定：拥有 seatId === 'seat_0' 且无 agentArc 主导，或显式 controller==='human'（兼容）。
@@ -679,7 +907,7 @@ Story.getPrivateViewForActor = function (state, actorId) {
   return Story.getPrivateActorView(state, actorId);
 };
 
-/** 重新润色：只重写文案，绝不重新结算（V3.2 §R2） */
+/** 重新润色：只重写文案，绝不重新结算（V3.3 §R2）。AI 失败返回 null，不调用离线兜底。 */
 Story.regenerateChapter = async function () {
   const state = Story.state;
   if (!state || !state.story.currentChapter) return null;
@@ -688,18 +916,14 @@ Story.regenerateChapter = async function () {
   const record = (state.ledger.turnRecords || []).find(function (t) { return t.turnId === turnId; });
   const envelope = record ? record.resolutionEnvelope : null;
   const scene = s.currentScene;
-  const beforeChron = JSON.stringify(s.chronicle);
-  const beforeYear = state.world.year;
-  const beforeRng = Story.snapshotRng(state);
   const brief = envelope ? Story.Narration.buildBrief(state, scene, envelope) : null;
   let narration = null;
   if (Story.ai.enabled && brief) narration = await Story.Provider.narrate(state, brief);
-  let chapter;
-  if (narration && narration.title && narration.chapter) {
-    chapter = Story.Narration.assembleFromAI(state, scene, envelope, narration);
-  } else {
-    chapter = Story.Narration.assembleOffline(state, scene, envelope);
+  if (!narration || !narration.title || !narration.chapter) {
+    // AI 失败：保留原章节，不替换文案
+    return null;
   }
+  const chapter = Story.Narration.assembleFromAI(state, scene, envelope, narration);
   // 仅替换文案字段
   s.currentChapter.title = chapter.title;
   s.currentChapter.chapter = chapter.chapter;
@@ -707,10 +931,6 @@ Story.regenerateChapter = async function () {
   s.currentChapter.provenance = chapter.provenance;
   s.currentChapter.renderVersion = (s.currentChapter.renderVersion || 0) + 1;
   Story.snapshotRng(state);
-  // 确保未改变结算状态
-  if (JSON.stringify(s.chronicle) !== beforeChron) {
-    // 不应发生；保守恢复
-  }
   return s.currentChapter;
 };
 
@@ -966,13 +1186,110 @@ Story.Intent._inferTime = function (t, category) {
 
 Story.Scene = Story.Scene || {};
 
+/* ---------- V3.3 Phase 3：SceneEntity 归一化（字符串/对象双兼容） ---------- */
+Story.Scene.Entity = {
+  /** 把任意条目数组归一为 SceneEntity 对象数组。字符串 → 推断 kind + 默认 affordances。 */
+  normalize: function (arr) {
+    if (!Array.isArray(arr)) return [];
+    return arr.map(function (e, i) {
+      if (e && typeof e === 'object') {
+        return {
+          id: e.id || ('ent_' + i),
+          name: e.name || e.id || ('事物' + i),
+          kind: e.kind || 'prop',
+          affordances: Array.isArray(e.affordances) ? e.affordances.slice() : [],
+          state: e.state || null,
+        };
+      }
+      const name = String(e);
+      const kind = Story.Scene.Entity._guessKind(name);
+      return { id: 'ent_' + i + '_' + name, name: name, kind: kind, affordances: Story.Scene.Entity._defaultAffordances(kind), state: null };
+    });
+  },
+  _guessKind: function (name) {
+    if (/(剑|符|印|鼎|镜|珠|令|残剑)/.test(name)) return 'relic';
+    if (/(信|图|卷|册|契|密信)/.test(name)) return 'clue';
+    if (/(掌柜|掌门|弟子|使者|老者|女子|男子|童子|掌柜)/.test(name)) return 'npc';
+    if (/(门|路|径|院|道|口|来路|深处|小径|旧址)/.test(name)) return 'exit';
+    return 'prop';
+  },
+  _defaultAffordances: function (kind) {
+    const map = { relic: ['use_relic', 'investigate'], clue: ['investigate', 'observe'], npc: ['social', 'negotiate'], exit: ['travel', 'flee'], prop: ['observe'] };
+    return map[kind] || ['observe'];
+  },
+  /** 该实体是否支持某类行动 */
+  affordance: function (entity, category) {
+    return !!(entity && Array.isArray(entity.affordances) && entity.affordances.indexOf(category) >= 0);
+  },
+  /** 取名字数组（便于旧逻辑 rng.pick / indexOf 兼容） */
+  names: function (arr) {
+    return Story.Scene.Entity.normalize(arr).map(function (e) { return e.name; });
+  },
+  /** 按类型筛选 */
+  byKind: function (arr, kind) {
+    return Story.Scene.Entity.normalize(arr).filter(function (e) { return e.kind === kind; });
+  },
+};
+
+/* ---------- V3.3 Phase 3：AssetRegistry —— 资产登记表 ---------- */
+Story.AssetRegistry = {
+  register: function (state, asset) {
+    if (!state || !asset || !asset.id) return null;
+    if (!state.assets) state.assets = [];
+    const existing = state.assets.find(function (a) { return a.id === asset.id; });
+    if (existing) { Object.assign(existing, asset); return existing; }
+    const a = {
+      id: asset.id,
+      name: asset.name || asset.id,
+      kind: asset.kind || 'relic',          // relic | clue | item | resource
+      ownerActorId: asset.ownerActorId || null,
+      locationId: asset.locationId || null,
+      state: asset.state || 'intact',        // intact | attuned | depleted | sealed
+      uses: asset.uses || 0,
+      publicHint: asset.publicHint || '',
+    };
+    state.assets.push(a);
+    return a;
+  },
+  get: function (state, id) {
+    if (!state || !state.assets) return null;
+    return state.assets.find(function (a) { return a.id === id; }) || null;
+  },
+  byOwner: function (state, actorId) {
+    if (!state || !state.assets) return [];
+    return state.assets.filter(function (a) { return a.ownerActorId === actorId; });
+  },
+  byLocation: function (state, locId) {
+    if (!state || !state.assets) return [];
+    return state.assets.filter(function (a) { return a.locationId === locId; });
+  },
+  all: function (state) { return (state && state.assets) || []; },
+};
+
+/* ---------- V3.3 Phase 2：共享场景下的角色在场状态 ---------- */
+Story.Scene.getActorPresence = function (state, actorId) {
+  const a = state.actors.find(function (x) { return x.id === actorId; });
+  return a ? { locationId: a.locationId, presence: a.presence || 'present' } : { locationId: null, presence: 'absent' };
+};
+Story.Scene.actorsPresent = function (state) {
+  const loc = state.story.currentScene && state.story.currentScene.locationId;
+  return state.actors.filter(function (a) { return a.presence !== 'away' && (!a.locationId || !loc || a.locationId === loc); });
+};
+/** 把角色位置同步到指定场景（开局或全员迁移时调用） */
+Story.Scene._syncActorsToScene = function (state, scene) {
+  if (!scene) return;
+  (state.actors || []).forEach(function (a) {
+    a.locationId = scene.locationId;
+    a.presence = 'present';
+  });
+};
+
 Story.Scene.createOpeningScene = function (state) {
   const w = state.world.worldBible;
   const rng = Story.rngFor('event', state);
-  const regionKinds = w.regionKinds || ['城池'];
   const place = '赤砂边城·听雨客栈';
   const sceneId = 'scene_0001';
-  return {
+  const scene = {
     sceneId: sceneId,
     locationId: 'inn_redsand',
     locationName: place,
@@ -981,9 +1298,21 @@ Story.Scene.createOpeningScene = function (state) {
     focalActorIds: state.actors.map(function (a) { return a.id; }).slice(0, 2),
     immediateConflict: '商会使者将连夜离城，半封密信下落不明。',
     immediateQuestion: '是否追查被截断的密信？',
-    visibleEntities: ['女掌柜', '半封商会密信', '残剑'],
-    availableAssets: ['半封商会密信', '残剑'],
-    exits: ['城门', '客栈后院', '商会旧址'],
+    // V3.3 Phase 3：对象化实体 + affordances
+    visibleEntities: [
+      { id: 'ent_innkeeper', name: '女掌柜', kind: 'npc', affordances: ['social', 'negotiate', 'observe'] },
+      { id: 'ent_trade_letter', name: '半封商会密信', kind: 'clue', affordances: ['investigate', 'observe'] },
+      { id: 'ent_residual_sword', name: '残剑', kind: 'relic', affordances: ['use_relic', 'investigate'] },
+    ],
+    availableAssets: [
+      { id: 'asset_trade_letter', name: '半封商会密信', kind: 'clue', affordances: ['investigate'] },
+      { id: 'asset_residual_sword', name: '残剑', kind: 'relic', affordances: ['use_relic'] },
+    ],
+    exits: [
+      { id: 'exit_gate', name: '城门', kind: 'exit', affordances: ['travel', 'flee'] },
+      { id: 'exit_backyard', name: '客栈后院', kind: 'exit', affordances: ['travel', 'observe'] },
+      { id: 'exit_guild', name: '商会旧址', kind: 'exit', affordances: ['travel', 'investigate'] },
+    ],
     activeThreadIds: ['thread_trade_letter', 'thread_old_sword'],
     pressure: 1,
     deadline: { type: '商会离城', remaining: 2, unit: '夜' },
@@ -994,10 +1323,17 @@ Story.Scene.createOpeningScene = function (state) {
     recentEvents: [],
     hiddenFacts: [],
   };
+  // V3.3 Phase 3：登记资产到 AssetRegistry
+  if (state.assets) {
+    Story.AssetRegistry.register(state, { id: 'residual_sword', name: '残剑', kind: 'relic', ownerActorId: (state.actors[0] && state.actors[0].id) || null, locationId: 'inn_redsand', state: 'attuned', publicHint: '剑身微颤，似有灵识。' });
+    Story.AssetRegistry.register(state, { id: 'trade_letter', name: '半封商会密信', kind: 'clue', ownerActorId: null, locationId: 'inn_redsand', state: 'intact', publicHint: '雨水浸坏了一半字迹。' });
+  }
+  // V3.3 Phase 2：角色同步到开局场景
+  Story.Scene._syncActorsToScene(state, scene);
+  return scene;
 };
 
 Story.Scene.createLegacyScene = function (state) {
-  const w = (state && state.world && state.world.worldBible) || {};
   return {
     sceneId: 'scene_legacy',
     locationId: 'legacy',
@@ -1034,12 +1370,24 @@ Story.Scene.createOpeningThreads = function (state) {
   ];
 };
 
-/** 是否应切换场景（V3.2 §G3） */
+/** 是否应切换场景（V3.3 Phase 2 共享场景版）。
+ *  travel/flee 不再无条件重写全员位置：
+ *    - 玩家(主人类角色)移动，或半数以上活跃角色同时移动 → 'move'（整队迁移，重写共享场景）
+ *    - 仅少数（如单个 Bot）移动 → 'partial_move'（共享场景保留，移动者标记 away）
+ *  其余逻辑同 V3.2。 */
 Story.Scene.shouldTransition = function (state, envelope) {
   const actions = envelope.actions || [];
-  const cats = actions.map(function (a) { return a.category; });
-  if (cats.indexOf('travel') >= 0) return 'move';
-  if (cats.indexOf('flee') >= 0) return 'move';
+  const movers = actions.filter(function (a) { return a.category === 'travel' || a.category === 'flee'; });
+  if (movers.length > 0) {
+    const player = Story.getPrimaryHumanActor(state);
+    const playerMoves = player && movers.some(function (m) { return m.actorId === player.id; });
+    const active = (state.actors || []).filter(function (a) { return a.presence !== 'away'; });
+    const majority = active.length > 0 && (movers.length * 2 >= active.length);
+    // 单人/独游：默认整队迁移（保留 V3.2 行为，避免破坏单人体验）
+    const solo = active.length <= 1;
+    if (playerMoves || majority || solo) return 'move';
+    return 'partial_move';
+  }
   if (envelope.worldDelta && envelope.worldDelta.epochJump) return 'epoch_jump';
   // 时间跨度极大
   const tp = envelope.actions[0] && envelope.actions[0].timePassed;
@@ -1050,7 +1398,7 @@ Story.Scene.shouldTransition = function (state, envelope) {
   return 'stay';
 };
 
-/** 组合下一场景（V3.2 §G3） */
+/** 组合下一场景（V3.3 Phase 2 + 3） */
 Story.Scene.composeNext = function (state, envelope) {
   const prev = state.story.currentScene || Story.Scene.createLegacyScene(state);
   const transition = Story.Scene.shouldTransition(state, envelope);
@@ -1064,12 +1412,38 @@ Story.Scene.composeNext = function (state, envelope) {
     next.locationName = (moveAct && moveAct.targetId === 'trade_caravan') ? '断流古道·车辙' : (next.locationName + '·外');
     next.immediateConflict = moveAct && moveAct.category === 'flee' ? '追兵仍在身后，未肯罢休。' : '古道车辙在雨中被两种脚印覆盖。';
     next.immediateQuestion = moveAct && moveAct.category === 'flee' ? '如何甩脱追踪？' : '是否沿车辙继续追查？';
-    next.exits = ['来路', '古道深处', '林间小径'];
-    next.visibleEntities = ['车辙', '雨', '残剑'];
-    next.availableAssets = ['残剑'];
+    // V3.3 Phase 3：对象化出口/实体
+    next.exits = [
+      { id: 'exit_back', name: '来路', kind: 'exit', affordances: ['travel', 'flee'] },
+      { id: 'exit_deep', name: '古道深处', kind: 'exit', affordances: ['travel', 'investigate'] },
+      { id: 'exit_path', name: '林间小径', kind: 'exit', affordances: ['travel', 'flee'] },
+    ];
+    next.visibleEntities = [
+      { id: 'ent_rut', name: '车辙', kind: 'clue', affordances: ['investigate', 'observe'] },
+      { id: 'ent_rain', name: '雨', kind: 'prop', affordances: ['observe'] },
+      { id: 'ent_residual_sword', name: '残剑', kind: 'relic', affordances: ['use_relic', 'investigate'] },
+    ];
+    next.availableAssets = [{ id: 'asset_residual_sword', name: '残剑', kind: 'relic', affordances: ['use_relic'] }];
     next.enteredAtChapter = idx;
     next.deadline = null;
     next.pressure = Math.max(2, prev.pressure);
+    // V3.3 Phase 2：整队迁移 → 全员同步到新场景，离队者归队
+    Story.Scene._syncActorsToScene(state, next);
+  } else if (transition === 'partial_move') {
+    // V3.3 Phase 2：少数移动 → 共享场景不变；离队者归队(targetId=rejoin_party)则回到 present
+    const movers = (envelope.actions || []).filter(function (a) { return a.category === 'travel' || a.category === 'flee'; });
+    movers.forEach(function (m) {
+      const a = state.actors.find(function (x) { return x.id === m.actorId; });
+      if (!a) return;
+      if (m.targetId === 'rejoin_party') {
+        a.presence = 'present';
+        a.locationId = next.locationId;
+      } else {
+        a.presence = 'away';
+        a.locationId = (m.targetId === 'trade_caravan') ? 'road_broken_flow' : (m.targetId || 'road_broken_flow');
+      }
+    });
+    next.pressure = Math.min(5, Math.max(1, prev.pressure));
   } else if (transition === 'skip_time' || transition === 'epoch_jump') {
     next.timeOfDay = '数月之后';
     next.weather = '换季';
@@ -1077,8 +1451,8 @@ Story.Scene.composeNext = function (state, envelope) {
   } else {
     // stay / reveal / escalate / close
     if (transition === 'reveal') {
-      next.visibleEntities = prev.visibleEntities.concat(['药谷旧印']);
-      next.availableAssets = prev.availableAssets.concat(['药谷旧印']);
+      next.visibleEntities = prev.visibleEntities.concat([{ id: 'ent_yaogu_seal', name: '药谷旧印', kind: 'clue', affordances: ['investigate', 'observe'] }]);
+      next.availableAssets = prev.availableAssets.concat([{ id: 'asset_yaogu_seal', name: '药谷旧印', kind: 'clue', affordances: ['investigate'] }]);
     }
     // deadline 推进
     if (next.deadline) {
@@ -1236,7 +1610,8 @@ Story.Resolver._resolveRest = function (state, scene, intent, base, rng) {
   // 高压场景可能被打扰
   if (scene && scene.pressure >= 3) {
     if (rng.chance(0.6)) {
-      const threat = (scene.visibleEntities.indexOf('追兵') >= 0) ? '追兵' : (scene.immediateConflict || '外界威胁');
+      const _visNames = Story.Scene.Entity.names(scene.visibleEntities);
+      const threat = (_visNames.indexOf('追兵') >= 0) ? '追兵' : (scene.immediateConflict || '外界威胁');
       base.publicEffects.push(actor.name + '在休息时被' + threat + '惊扰。');
       costs.push({ type: 'interrupted', text: '休息被' + threat + '打断。' });
       outcome = 'interrupted';
@@ -1270,7 +1645,8 @@ Story.Resolver._resolveWait = function (state, scene, intent, base, rng) {
 Story.Resolver._resolveObserve = function (state, scene, intent, base, rng) {
   const actor = state.actors.find(function (a) { return a.id === intent.actorId; });
   base.outcome = 'success';
-  const detail = (scene && scene.visibleEntities.length) ? rng.pick(scene.visibleEntities) : '周围动静';
+  const _obsNames = (scene && scene.visibleEntities && scene.visibleEntities.length) ? Story.Scene.Entity.names(scene.visibleEntities) : [];
+  const detail = _obsNames.length ? rng.pick(_obsNames) : '周围动静';
   base.gains = [{ type: 'info', text: '观察到' + detail + '的细微异常。' }];
   base.costs = [{ type: 'time', text: '片刻时间流逝。' }];
   base.publicEffects = [actor.name + '暗中留意' + detail + '。'];
@@ -1670,12 +2046,30 @@ Story.ChoiceFactory.buildForActor = function (state, actorId, scene, envelope) {
 
   // 候选池：基于场景的具体选项
   const pool = Story.ChoiceFactory._candidatePool(state, actor, scene2, envelope);
+  // V3.3 Phase 2：离队者强制保留「返回同行」选项（确定性，不交由洗牌）
+  const pinned = [];
+  let restPool = pool;
+  if (actor && actor.presence === 'away') {
+    const rejoin = pool.find(function (c) { return c.intentCategory === 'travel' && c.targetId === 'rejoin_party'; });
+    if (rejoin) {
+      pinned.push(rejoin);
+      restPool = pool.filter(function (c) { return c !== rejoin; });
+    }
+  }
   // 洗牌并选 3 个不同 category
-  const shuffled = rng.shuffle(pool);
+  const shuffled = rng.shuffle(restPool);
   const chosen = [];
   const usedCats = {};
   const usedFingerprints = {};
   const recent = (state.story.recentChoiceFingerprints || []).slice(-12);
+  // 先放入 pinned（离队者归队选项），其 category 视为已用
+  pinned.forEach(function (c) {
+    const fp = Story.ChoiceFactory.fingerprint(c);
+    c.fingerprint = fp;
+    usedFingerprints[fp] = true;
+    usedCats[c.intentCategory] = true;
+    chosen.push(c);
+  });
   for (let i = 0; i < shuffled.length && chosen.length < 3; i++) {
     const c = shuffled[i];
     const fp = Story.ChoiceFactory.fingerprint(c);
@@ -1714,8 +2108,9 @@ Story.ChoiceFactory.fingerprint = function (choice) {
 Story.ChoiceFactory._candidatePool = function (state, actor, scene, envelope) {
   const idx = state.story.chapterIndex + 1;
   const sid = scene.sceneId;
-  const visible = scene.visibleEntities || [];
-  const exits = scene.exits || [];
+  // V3.3 Phase 3：归一化为 SceneEntity（字符串/对象双兼容）
+  const visible = Story.Scene.Entity.normalize(scene.visibleEntities);
+  const exits = Story.Scene.Entity.normalize(scene.exits);
   const threads = (state.story.activeThreads || []).filter(function (t) { return t.status === 'active'; });
   const pool = [];
   const mk = function (cat, approach, ttype, tid, label, hint, tags, risk, primaryThread, timeHint) {
@@ -1728,37 +2123,57 @@ Story.ChoiceFactory._candidatePool = function (state, actor, scene, envelope) {
     };
   };
 
+  // V3.3 Phase 2：离队角色优先给「返回同行」选项（travel 回到主场景）
+  if (actor.presence === 'away') {
+    const homeLoc = (scene && scene.locationName) || '同行之处';
+    pool.push(mk('travel', 'rejoin', 'exit', 'rejoin_party',
+      '返回' + homeLoc + '，与同行者会合。', '离队者归队，重新加入共同场景。', ['travel', 'rejoin'], 2, null, '片刻'));
+  }
+
   // 推进当前冲突（investigate）
   if (threads[0]) {
     pool.push(mk('investigate', 'pursue', 'clue', threads[0].threadId,
       '追查“' + threads[0].title + '”的具体下落。', '可能推进线索，但会暴露意图。', ['investigate', 'clue'], 2, threads[0].threadId, '数日'));
   }
-  // 改变关系或利用人物（social）
-  const npcName = visible.find(function (e) { return e.indexOf('掌柜') >= 0 || e.indexOf('女掌柜') >= 0; }) || (visible[0] || '在场之人');
-  const npcId = npcName.indexOf('掌柜') >= 0 ? 'innkeeper_01' : 'npc_present';
+  // 改变关系或利用人物（social）—— 从 npc 实体派生
+  const npcEnt = visible.find(function (e) { return e.kind === 'npc'; }) || visible[0] || null;
+  const npcName = npcEnt ? npcEnt.name : '在场之人';
+  const npcId = /掌柜/.test(npcName) ? 'innkeeper_01' : (npcEnt ? npcEnt.id : 'npc_present');
   pool.push(mk('social', 'pressure', 'npc', npcId,
     '拿半封密信逼问' + npcName + '。', '可能换取情报，但关系恶化。', ['social', 'secret'], 2, 'thread_trade_letter', '片刻'));
   // 恢复/规避/积累（rest / cultivate / wait）
   pool.push(mk('rest', 'recover', 'self', 'self',
     '留在客栈休养一夜，让残剑替你记住梦中钟声。', '恢复伤势，但可能错过机会。', ['rest', 'recovery'], 1, 'thread_old_sword', '一夜'));
-  // travel（追赶/换地）
-  if (exits.length) {
-    pool.push(mk('travel', 'pursue', 'exit', 'trade_caravan',
-      '连夜出城，追赶已离城的商队。', '地点改变，路途有风险。', ['travel', 'risk'], 3, 'thread_trade_letter', '数日'));
+  // travel（追赶/换地）—— 从 exit 实体派生
+  // V3.3 Phase 2：离队者已在场景之外，不再给「再次出发」选项（归队由 rejoin_party 选项承担）
+  if (actor.presence !== 'away') {
+    const travelExit = exits.find(function (e) { return Story.Scene.Entity.affordance(e, 'travel'); }) || exits[0];
+    if (travelExit) {
+      pool.push(mk('travel', 'pursue', 'exit', 'trade_caravan',
+        '连夜出城，追赶已离城的商队。', '地点改变，路途有风险。', ['travel', 'risk'], 3, 'thread_trade_letter', '数日'));
+    }
   }
-  // use_relic
-  pool.push(mk('use_relic', 'insight', 'relic', 'residual_sword',
-    '以残剑为媒，召来一缕游离剑意。', '推进残剑线索，但法宝有灵。', ['use_relic', 'fate'], 2, 'thread_old_sword', '片刻'));
+  // use_relic —— 从 relic 实体 / AssetRegistry 派生
+  const relicEnt = visible.find(function (e) { return e.kind === 'relic'; });
+  const relicAsset = Story.AssetRegistry.get(state, 'residual_sword') || (relicEnt ? { id: relicEnt.id } : null);
+  if (relicAsset) {
+    pool.push(mk('use_relic', 'insight', 'relic', relicAsset.id,
+      '以残剑为媒，召来一缕游离剑意。', '推进残剑线索，但法宝有灵。', ['use_relic', 'fate'], 2, 'thread_old_sword', '片刻'));
+  }
   // observe
   pool.push(mk('observe', 'covert', 'clue', 'scene_anomaly',
     '不露声色，留意客栈后院的动静。', '获得细节，少量时间。', ['observe', 'info'], 1, null, '片刻'));
   // negotiate
   pool.push(mk('negotiate', 'ally', 'npc', npcId,
     '与' + npcName + '谈条件，换一夜安稳与消息。', '可能达成交换，留下承诺。', ['negotiate', 'pact'], 2, 'thread_trade_letter', '片刻'));
-  // flee（仅 pressure 较高时）
-  if ((scene.pressure || 0) >= 2) {
-    pool.push(mk('flee', 'evade', 'exit', 'nearest_exit',
-      '趁雨离城，避开已经开始搜人的巡卫。', '暂脱危险，但追兵不散。', ['flee', 'risk'], 3, null, '片刻'));
+  // flee（仅 pressure 较高时）—— 从支持 flee 的 exit 派生
+  // V3.3 Phase 2：离队者不在共享场景内，无 flee 语义
+  if (actor.presence !== 'away') {
+    const fleeExit = exits.find(function (e) { return Story.Scene.Entity.affordance(e, 'flee'); }) || exits[0];
+    if ((scene.pressure || 0) >= 2 && fleeExit) {
+      pool.push(mk('flee', 'evade', 'exit', fleeExit.id || 'nearest_exit',
+        '趁雨离城，避开已经开始搜人的巡卫。', '暂脱危险，但追兵不散。', ['flee', 'risk'], 3, null, '片刻'));
+    }
   }
   // cultivate（仅低压力）
   if ((scene.pressure || 0) <= 2) {
@@ -1933,112 +2348,6 @@ Story.Narration.buildBrief = function (state, scene, envelope) {
   };
 };
 
-/** 离线章节组装（LocalNarrativeAssembler，V3.2 §P2 / §11） */
-Story.Narration.assembleOffline = function (state, scene, envelope) {
-  const rng = Story.rngFor('narration', state);
-  const idx = state.story.chapterIndex + 1;
-  const title = Story.Narration.buildFallbackTitle(state, scene, envelope);
-
-  // 来自 envelope 的具体结果块
-  const action = (envelope && envelope.actions && envelope.actions[0]) || null;
-  const beats = (envelope && envelope.narrationBeats) || [];
-
-  // 焦点角色：优先取行动所属角色；无行动时回落到场景焦点或主角
-  let focal = state.actors[0] || { name: '众人' };
-  if (action && action.actorId) {
-    const actActor = state.actors.find(function (a) { return a.id === action.actorId; });
-    if (actActor) focal = actActor;
-  } else if (scene && scene.focalActorIds && scene.focalActorIds[0]) {
-    const sf = state.actors.find(function (a) { return a.id === scene.focalActorIds[0]; });
-    if (sf) focal = sf;
-  }
-  const fname = focal.name || '众人';
-
-  // 第一段：场景定场 + 角色动作与即时结果（不直接回放玩家原文，而是用裁决语义改写）
-  let p1 = '';
-  const locName = (scene && scene.locationName) || '此地';
-  const pressure = (scene && scene.immediateConflict) ? ('「' + scene.immediateConflict + '」的阴影尚未散去，') : '';
-  const sceneLead = locName + '上空的云层缓慢压低，风从檐角穿过，带来潮湿土腥与淡淡铁锈味。';
-  if (action) {
-    const catText = {
-      rest: fname + '没有追出去，反而回到原处歇下。雨声盖住了城门外的车轮，也盖住了某些不该被听见的动静。',
-      wait: fname + '按兵不动，让这一夜自行铺展。客栈的灯火在风里晃了两晃，像是在替谁数着更漏。',
-      observe: fname + '不露声色，把周遭的动静一一收进眼底。檐角的湿痕、地上的脚印、众人嘴边没说出口的话，都被记在心里。',
-      investigate: fname + '循着线索查去，雨里的痕迹比预想更密。每往前一步，就多出一处此前没人留意的破绽。',
-      social: fname + '与在场之人交涉，话锋里藏着试探。几句话下来，谁是真心、谁在敷衍，已经分出了轮廓。',
-      negotiate: fname + '与对方谈定条件，承诺与得失一并落下。这一纸口头之约，比任何契约都更难反悔。',
-      cultivate: fname + '闭关静修，数月只在一呼一吸间过去。再睁眼时，体内的灵气已比先前凝实了几分。',
-      craft: fname + '潜心炼制，材料与时间一同消融。炉火明灭之间，一件雏形渐渐显出轮廓。',
-      battle: fname + '正面迎上威胁，锋刃与法力交错。这一场没有看客，每一招都关乎接下来能否全身而退。',
-      flee: fname + '暂避锋芒，但身后的追踪并未停歇。雨幕成了掩护，也成了阻碍。',
-      deceive: fname + '表面顺从，暗中另设一局。旁人看见的是退让，看不见的是另一条暗线正在收紧。',
-      use_relic: fname + '以残剑为媒，触动一缕游离的剑意。剑身微颤，像是认出了什么旧主。',
-      steal: fname + '暗中下手，指尖比雨声更轻。东西到手的那一刻，没有人察觉到任何异样。',
-      aid: fname + '援护同伴，把自己的退路让了出去。这一手未必能换来感激，却让对方多了一分活路。',
-      travel: fname + '动身离城，脚下的路已经改变。身后的' + locName + '在雨里渐渐变小，前方的去处仍未可知。',
-      freeform: fname + '依着心中的打算付诸行动，让这一夜给出回应。' + pressure + '每一个选择都在改变四人原本松散的节奏。',
-    }[action.category] || (fname + '付诸行动，让这一夜给出回应。');
-    p1 = sceneLead + catText;
-  } else {
-    p1 = sceneLead + fname + '立于' + locName + '之上，风从远处带来不寻常的气息。' + pressure + '此界故事尚未真正开始。';
-  }
-
-  // 第二段：代价/世界变化/人物反应
-  const w = state.world.worldBible || {};
-  const rule = (w.rules && w.rules.length) ? rng.pick(w.rules) : '此界规则仍在暗处运转。';
-  const costText = (action && action.costs && action.costs.length) ? action.costs[0].text : '';
-  const gainText = (action && action.gains && action.gains.length) ? action.gains[0].text : '';
-  // 行动结果回响（保证段落数据实而非占位，并补充字数到 180+）
-  const outcomeLabel = (action && action.outcome) ? Story.Narration._outcomeLabel(action.outcome) : '了结';
-  const catLabel = (action && action.category) ? Story.Narration._catLabel(action.category) : '行动';
-  const outcomeBeat = '这一番' + catLabel + '终究' + outcomeLabel + '，' + (gainText ? '有所得亦有所失' : '未曾惊动太多人') + '，' + locName + '的夜色把一切收进沉默里。';
-  let p2 = rule + ' ' + outcomeBeat + ' ';
-  if (costText) p2 += costText + ' ';
-  if (gainText) p2 += gainText + ' ';
-  // 同伴反应（最多 1 条远景痕迹）
-  const companions = state.actors.filter(function (a) { return a.id !== (focal && focal.id); });
-  if (companions.length) {
-    const c = companions[0];
-    const trace = rng.pick([
-      c.name + '没有追问，却在' + locName + '外围替众人留出一条退路；回来时，他带回的消息恰好补上了行动中缺失的一角。',
-      c.name + '循着另一处动静查去，袖口沾着细碎尘土。他只说看见有人在暗中观察' + fname + '，却不肯断言对方是敌是友。',
-      c.name + '把一件不起眼的小事记在心里：当' + fname + '付诸行动时，附近的灵气曾短暂逆流。',
-    ]);
-    p2 += trace;
-  }
-
-  // 第三段：视觉收束
-  const endingImage = rng.pick([
-    '雨水顺着密信残角滴落，墨迹晕开成一片看不清的字。',
-    '城门外的车辙在雨中渐渐模糊，像是谁来过，又像是谁都没来。',
-    '客栈的灯还亮着，没有人去添油，它就那样亮到天明。',
-    '残剑在鞘中轻轻一颤，又归于沉寂，像是在等一个还没到的人。',
-    '后院的阵纹在雨水中泛起微光，转瞬即逝，只留下一圈浅浅的水痕。',
-  ]);
-  const p3 = endingImage;
-
-  let chapter = p1 + '\n\n' + p2 + '\n\n' + p3;
-  // 长度控制：180-400 中文字符（去除换行计数）
-  const len = chapter.replace(/\s/g, '').length;
-  if (len > 400) {
-    // 截断到第三段前
-    chapter = p1 + '\n\n' + p2;
-    if (chapter.replace(/\s/g, '').length > 400) chapter = p1;
-  }
-  // 禁用模板句过滤（保险）
-  chapter = Story.Narration._stripForbidden(chapter);
-
-  return {
-    title: title,
-    chapter: chapter,
-    chapterSummary: Story.Narration._summary(state, scene, action, beats),
-    timePassed: (action && action.timePassed) || { value: 1, unit: '片刻' },
-    endingImage: endingImage,
-    dialogues: [],
-    provenance: 'offline-resolved',
-    narrationStatus: 'ok',
-  };
-};
 
 /** 从 AI 返回组装章节（仅取 title/chapter/dialogues/endingImage，丢弃越权字段） */
 Story.Narration.assembleFromAI = function (state, scene, envelope, narration) {
@@ -2655,28 +2964,63 @@ Story.getPrivateEvents = function (actorId) {
 /** 世界志抽屉：本章人物 / 世界传闻 / 修真编年史 / 未结因果（V3 §8）。 */
 Story.getWorldArchive = function () {
   if (!Story.state) return null;
+  const scene = Story.state.story.currentScene;
   return {
     cast: Story.state.actors.map(function (a) {
-      return { id: a.id, name: a.name, identity: a.identity, daoPath: a.daoPath, status: a.statusSummary, publicWish: a.publicWish, relationHints: a.relationHints };
+      return {
+        id: a.id, name: a.name, identity: a.identity, daoPath: a.daoPath, status: a.statusSummary,
+        publicWish: a.publicWish, relationHints: a.relationHints,
+        // V3.3 Phase 4：命盘公开回响 + Phase 2 在场状态
+        fateEcho: Story.CharacterGenesis.publicEcho(a.fatePlate),
+        presence: a.presence || 'present',
+        locationId: a.locationId || null,
+      };
     }),
     rumors: Story.state.world.publicRumors.slice(-10),
     chronicle: Story.state.story.chronicle.slice(-15),
     activeHooks: Story.state.world.activeWorldHooks.slice(-12),
     factions: Story.state.world.factions.slice(),
     relics: Story.state.ledger.relics.slice(),
+    // V3.3 Phase 3：场景实体/出口（对象化）
+    scene: scene ? {
+      locationName: scene.locationName,
+      entities: Story.Scene.Entity.normalize(scene.visibleEntities),
+      exits: Story.Scene.Entity.normalize(scene.exits),
+      pressure: scene.pressure,
+      deadline: scene.deadline ? Story._clone(scene.deadline) : null,
+    } : null,
+    // V3.3 Phase 3：资产登记表
+    assets: Story.AssetRegistry.all(Story.state).slice(),
   };
 };
 
 /** 天机全览（开发者模式：含私密信息）。 */
 Story.getOmniscientView = function () {
   if (!Story.state) return null;
+  const scene = Story.state.story.currentScene;
   return {
     actors: Story.state.actors.map(function (a) {
-      return { id: a.id, name: a.name, hiddenFate: a.hiddenFate, privateFacts: (a.privateFacts || []).slice(), hidden: Story._clone(a.hidden), aiChosenLastTurn: Story.state.story.aiChosenLastTurn[a.id] };
+      return {
+        id: a.id, name: a.name, hiddenFate: a.hiddenFate,
+        privateFacts: (a.privateFacts || []).slice(),
+        hidden: Story._clone(a.hidden),
+        aiChosenLastTurn: Story.state.story.aiChosenLastTurn[a.id],
+        // V3.3 Phase 4：完整命盘
+        fatePlate: a.fatePlate ? Story._clone(a.fatePlate) : null,
+        // V3.3 Phase 2：在场状态
+        presence: a.presence || 'present', locationId: a.locationId || null,
+      };
     }),
     turnChoices: Story._clone(Story.state.story.turnChoices),
     privateEvents: Story._clone(Story.state.ledger.privateEvents),
     chronicleRumors: (Story.state.ledger.chronicleRumors || []).slice(),
+    // V3.3 Phase 3：场景实体 + 资产
+    scene: scene ? {
+      locationName: scene.locationName, locationId: scene.locationId,
+      entities: Story.Scene.Entity.normalize(scene.visibleEntities),
+      exits: Story.Scene.Entity.normalize(scene.exits),
+    } : null,
+    assets: Story.AssetRegistry.all(Story.state).slice(),
   };
 };
 

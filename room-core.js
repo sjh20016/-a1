@@ -253,8 +253,19 @@ const Room = {};
           var actor = storyState.actors.find(function (a) { return a.seatId === s.seatId; });
           if (actor) s.actorId = actor.id;
         });
-        _openTurn(room);
-        room.status = 'collecting';
+        // V3.3：开局可能因 AI 失败停在 awaiting_narration
+        var openPhase = Story.getTurnPhase(storyState);
+        if (openPhase === 'awaiting_narration') {
+          room.status = 'awaiting_narration';
+          room.turn.phase = 'awaiting_narration';
+          var pr0 = Story.getPendingResolution(storyState);
+          var err0 = pr0 && pr0.lastNarrationError ? pr0.lastNarrationError : null;
+          room.turn.lastError = err0 ? ('天机未应：' + (err0.code || 'UNKNOWN') + ' — ' + (err0.message || '')) : '天机未应';
+          _logEvent(room, { type: 'NARRATION_AWAITING_RETRY', visibility: 'host', payload: { round: 0, error: room.turn.lastError } });
+        } else {
+          _openTurn(room);
+          room.status = 'collecting';
+        }
         _logEvent(room, { type: 'ROOM_STARTED', visibility: 'public', payload: { seed: room.settings.seed } });
         return room;
       } catch (e) {
@@ -541,7 +552,7 @@ const Room = {};
     return true;
   }
 
-  /** 结算回合：调用 Story.resolveTurn → 发布章节 → 开启下一回合 */
+  /** 结算回合：调用 Story.resolveTurn → 发布章节 → 开启下一回合（V3.3 Narration Transaction） */
   async function _resolveTurn(room) {
     room.status = 'resolving';
     room.turn.phase = 'resolving';
@@ -549,23 +560,69 @@ const Room = {};
     try {
       var actions = Object.assign({}, room.turn.actionsByActorId);
       await Story.resolveTurn(room.storySession, actions);
-      room.turn.phase = 'published';
-      room.turn.resolutionId = 'res_' + room.turn.round;
-      _logEvent(room, { type: 'CHAPTER_PUBLISHED', visibility: 'public', payload: { round: room.turn.round, chapterIndex: room.storySession.story.chapterIndex } });
-      _logEvent(room, { type: 'PRIVATE_CHOICES_DELIVERED', visibility: 'seat', payload: { round: room.turn.round } });
-      room.status = 'collecting';
-      _openTurn(room);
+      // V3.3：resolveTurn 成功返回后，根据 turnPhase 判断结果
+      var phase = Story.getTurnPhase(room.storySession);
+      if (phase === 'awaiting_narration') {
+        // AI 失败：停在 awaiting_narration，不清空提交状态，全员保持锁定
+        room.status = 'awaiting_narration';
+        room.turn.phase = 'awaiting_narration';
+        var pr = Story.getPendingResolution(room.storySession);
+        var err = pr && pr.lastNarrationError ? pr.lastNarrationError : null;
+        room.turn.lastError = err ? ('天机未应：' + (err.code || 'UNKNOWN') + ' — ' + (err.message || '')) : '天机未应';
+        _logEvent(room, { type: 'NARRATION_AWAITING_RETRY', visibility: 'host', payload: { round: room.turn.round, error: room.turn.lastError } });
+      } else {
+        // published：正常推进
+        room.turn.phase = 'published';
+        room.turn.resolutionId = 'res_' + room.turn.round;
+        _logEvent(room, { type: 'CHAPTER_PUBLISHED', visibility: 'public', payload: { round: room.turn.round, chapterIndex: room.storySession.story.chapterIndex } });
+        _logEvent(room, { type: 'PRIVATE_CHOICES_DELIVERED', visibility: 'seat', payload: { round: room.turn.round } });
+        room.status = 'collecting';
+        _openTurn(room);
+      }
     } catch (e) {
+      // resolving 异常（边界 1A）：回 collecting，保留 actionsByActorId + botActions，不清空 submittedActorIds
+      // 玩家可重新触发结算。Story.abortResolution 已在 resolveTurn 内部调用，回 collecting。
       room.status = 'collecting';
       room.turn.phase = 'collecting';
-      room.turn.lastError = e && e.message ? e.message : 'unknown narration error';
-      // Release human submissions so an unexpected engine error cannot leave
-      // every seat marked submitted forever. Bots may safely choose again.
-      room.turn.submittedActorIds = [];
-      room.turn.actionsByActorId = {};
-      room.turn.botStatusByActorId = {};
-      _autoSubmitBots(room);
+      room.turn.lastError = e && e.message ? e.message : 'unknown resolving error';
       _logEvent(room, { type: 'NARRATION_FAILED', visibility: 'host', payload: { error: e.message } });
+    } finally {
+      room._pending = null;
+    }
+  }
+
+  /** V3.3 重试叙事：仅在 awaiting_narration 可调用，复用同一 pendingResolution */
+  Room.coordinator.retryNarration = async function (roomId, options) {
+    var room = _rooms.get(roomId);
+    if (!room) throw new Error('房间不存在');
+    if (room.status !== 'awaiting_narration') throw new Error('当前不在待叙事状态');
+    room._pending = _retryNarration(room, options || {});
+    return room._pending;
+  };
+
+  async function _retryNarration(room, options) {
+    room.turn.lastError = null;
+    try {
+      await Story.retryNarration(room.storySession, options);
+      var phase = Story.getTurnPhase(room.storySession);
+      if (phase === 'awaiting_narration') {
+        // 仍失败：保持 awaiting_narration
+        var pr = Story.getPendingResolution(room.storySession);
+        var err = pr && pr.lastNarrationError ? pr.lastNarrationError : null;
+        room.turn.lastError = err ? ('天机未应：' + (err.code || 'UNKNOWN') + ' — ' + (err.message || '')) : '天机未应';
+        _logEvent(room, { type: 'NARRATION_RETRY_FAILED', visibility: 'host', payload: { round: room.turn.round, retryCount: pr ? pr.retryCount : 0, error: room.turn.lastError } });
+      } else {
+        // 成功：published → collecting
+        room.turn.phase = 'published';
+        room.turn.resolutionId = 'res_' + room.turn.round;
+        _logEvent(room, { type: 'CHAPTER_PUBLISHED', visibility: 'public', payload: { round: room.turn.round, chapterIndex: room.storySession.story.chapterIndex } });
+        _logEvent(room, { type: 'PRIVATE_CHOICES_DELIVERED', visibility: 'seat', payload: { round: room.turn.round } });
+        room.status = 'collecting';
+        _openTurn(room);
+      }
+    } catch (e) {
+      room.turn.lastError = e && e.message ? e.message : 'retry error';
+      _logEvent(room, { type: 'NARRATION_RETRY_FAILED', visibility: 'host', payload: { round: room.turn.round, error: e.message } });
     } finally {
       room._pending = null;
     }

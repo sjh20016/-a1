@@ -1,5 +1,6 @@
 const Story = require('./story-core.js');
 const Room = require('./room-core.js');
+const { setupMockAI } = require('./test-helpers.js');
 
 let passed = 0;
 let failed = 0;
@@ -48,7 +49,7 @@ async function createPlayableRoom(id, seed, allowCustomActions) {
 }
 
 async function main() {
-  Story.setAIEnabled(false);
+  setupMockAI(Story);
 
   console.log('\n— 房间行动输入边界 —');
   const room = await createPlayableRoom('reg_action', 'REG-ACTION', true);
@@ -74,12 +75,12 @@ async function main() {
   const fallbackChapter = fallbackChObj.chapter;
   const fallbackChoices = Story.getChoicesForActor(room.storySession, room.seats[0].actorId);
   const fbLen = fallbackChapter.replace(/\s/g, '').length;
-  // V3.2 §P2：离线正文 180-400 字、provenance=offline-resolved、不得机械回放玩家原文超过 16 连续字符
-  check('离线正文 provenance 为 offline-resolved', fallbackChObj.provenance === 'offline-resolved');
-  check('离线正文长度落在 180-400 字符', fbLen >= 180 && fbLen <= 400);
-  check('离线正文不得回放玩家原文超过 16 连续字符', fallbackChapter.indexOf('继续睡觉') < 0);
-  check('离线正文落实自定义行动（回合推进）', room.turn.round === fallbackRound + 1);
-  check('离线后续选项携带 intentCategory 指纹', fallbackChoices.length > 0 && fallbackChoices.every(function (c) { return !!c.intentCategory; }));
+  // V3.3：离线兜底已废除，章节由 AI（mock）生成，provenance=ai-json，不得回放玩家原文
+  check('V3.3 章节 provenance 为 ai-json', fallbackChObj.provenance === 'ai-json', fallbackChObj.provenance);
+  check('V3.3 章节正文非空', fbLen > 0, 'len=' + fbLen);
+  check('V3.3 章节不得回放玩家原文超过 16 连续字符', fallbackChapter.indexOf('继续睡觉') < 0);
+  check('V3.3 章节落实自定义行动（回合推进）', room.turn.round === fallbackRound + 1);
+  check('V3.3 后续选项携带 intentCategory 指纹', fallbackChoices.length > 0 && fallbackChoices.every(function (c) { return !!c.intentCategory; }));
 
   const noCustomRoom = await createPlayableRoom('reg_no_custom', 'REG-NO-CUSTOM', false);
   expectThrow('关闭自定义行动后服务端仍会校验', function () {
@@ -141,10 +142,9 @@ async function main() {
   const malformedChoices = Story.getChoicesForActor(malformedRoom.storySession, malformedRoom.seats[0].actorId);
   Room.coordinator.submitAction(malformedRoom.roomId, 'seat_0', { choiceId: malformedChoices[0].id });
   await Room.coordinator.awaitPending(malformedRoom.roomId);
-  check('AI 嵌套结构异常时自动使用本地叙事', malformedRoom.turn.round === malformedRound + 1);
+  check('AI 嵌套结构异常时越权字段被剥离仍出章', malformedRoom.turn.round === malformedRound + 1);
   check('AI 结构异常不会停在 resolving', malformedRoom.status === 'collecting');
-  Story.setAIEnabled(false);
-  Story.registerAIProvider(null);
+  setupMockAI(Story);
 
   const protocolRetryRoom = await createPlayableRoom('reg_protocol_retry', 'REG-PROTOCOL-RETRY', true);
   let protocolCalls = 0;
@@ -169,9 +169,9 @@ async function main() {
   check('章节协议首次失败会自动重试一次', protocolCalls === 2);
   check('协议重试成功后使用 API 正文', protocolRetryRoom.storySession.story.currentChapter.title === '协议重试成功');
   check('协议重试后房间正常进入下一回合', protocolRetryRoom.turn.round === protocolRound + 1 && protocolRetryRoom.status === 'collecting');
-  Story.setAIEnabled(false);
-  Story.registerAIProvider(null);
+  setupMockAI(Story);
 
+  // V3.3：AI 超时不再回退离线，而是停在 awaiting_narration 等待重试
   const timeoutRoom = await createPlayableRoom('reg_ai_timeout', 'REG-AI-TIMEOUT', true);
   const originalTimeout = Story.ai.timeoutMs;
   Story.ai.timeoutMs = 30;
@@ -181,11 +181,15 @@ async function main() {
   const timeoutChoices = Story.getChoicesForActor(timeoutRoom.storySession, timeoutRoom.seats[0].actorId);
   Room.coordinator.submitAction(timeoutRoom.roomId, 'seat_0', { choiceId: timeoutChoices[0].id });
   await Room.coordinator.awaitPending(timeoutRoom.roomId);
-  check('AI 请求超时后自动进入本地下一章', timeoutRoom.turn.round === timeoutRound + 1);
+  check('V3.3 AI 超时停在 awaiting_narration（不回退离线）', timeoutRoom.status === 'awaiting_narration', timeoutRoom.status);
+  check('V3.3 AI 超时回合不推进', timeoutRoom.turn.round === timeoutRound, 'round=' + timeoutRoom.turn.round);
   Story.ai.timeoutMs = originalTimeout;
-  Story.setAIEnabled(false);
-  Story.registerAIProvider(null);
+  // 恢复 mock AI 后重试叙事，验证可恢复
+  setupMockAI(Story);
+  await Room.coordinator.retryNarration(timeoutRoom.roomId, {});
+  check('V3.3 超时后重试叙事可恢复进入下一回合', timeoutRoom.turn.round === timeoutRound + 1 && timeoutRoom.status === 'collecting');
 
+  // V3.3 边界 1A：resolving 异常 → 回 collecting，保留提交状态（玩家可撤回重提）
   const recoveryRoom = await createPlayableRoom('reg_engine_recovery', 'REG-ENGINE-RECOVERY', true);
   const recoveryRound = recoveryRoom.turn.round;
   const recoveryChoices = Story.getChoicesForActor(recoveryRoom.storySession, recoveryRoom.seats[0].actorId);
@@ -194,13 +198,15 @@ async function main() {
   Room.coordinator.submitAction(recoveryRoom.roomId, 'seat_0', { choiceId: recoveryChoices[0].id });
   await Room.coordinator.awaitPending(recoveryRoom.roomId);
   Story.resolveTurn = originalResolveTurn;
-  check('引擎异常后房间解除锁定', recoveryRoom.status === 'collecting' && recoveryRoom.turn.phase === 'collecting');
-  check('引擎异常后真人提交状态已清理',
-    recoveryRoom.turn.submittedActorIds.indexOf(recoveryRoom.seats[0].actorId) < 0);
-  check('引擎异常原因被记录供 UI 提示', recoveryRoom.turn.lastError === '模拟引擎异常');
+  check('V3.3 引擎异常后房间回 collecting', recoveryRoom.status === 'collecting' && recoveryRoom.turn.phase === 'collecting');
+  check('V3.3 引擎异常后保留提交状态（边界 1A）',
+    recoveryRoom.turn.submittedActorIds.indexOf(recoveryRoom.seats[0].actorId) >= 0);
+  check('V3.3 引擎异常原因被记录供 UI 提示', recoveryRoom.turn.lastError === '模拟引擎异常');
+  // 撤回后重新提交以恢复（边界 1A：玩家可撤回重提）
+  Room.coordinator.cancelAction(recoveryRoom.roomId, 'seat_0');
   Room.coordinator.submitAction(recoveryRoom.roomId, 'seat_0', { choiceId: recoveryChoices[0].id });
   await Room.coordinator.awaitPending(recoveryRoom.roomId);
-  check('解除锁定后重新选择可正常进入下一回合', recoveryRoom.turn.round === recoveryRound + 1);
+  check('V3.3 撤回重提后可正常进入下一回合', recoveryRoom.turn.round === recoveryRound + 1);
 
   console.log('\n========================================');
   console.log('  回归测试通过 ' + passed + ' / 失败 ' + failed);

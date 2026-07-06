@@ -133,6 +133,17 @@ input,textarea,select{font-family:inherit;color:var(--text)}
 @keyframes spin{to{transform:rotate(360deg)}}
 .computing .ctxt{font-size:14px;color:var(--gold);letter-spacing:3px}
 
+/* V3.3 天机未应面板 */
+.narration-blocked{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 20px;gap:12px;max-width:560px;margin:0 auto;text-align:center}
+.narration-blocked .nb-icon{font-size:36px;color:var(--red);line-height:1}
+.narration-blocked .nb-title{font-size:22px;color:var(--gold);letter-spacing:4px;font-weight:700}
+.narration-blocked .nb-sub{font-size:13px;color:var(--text-dim);line-height:1.7}
+.narration-blocked .nb-detail{font-size:12px;color:var(--text);background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;padding:10px 14px;text-align:left;width:100%;line-height:1.7}
+.narration-blocked .nb-detail b{color:var(--cyan)}
+.narration-blocked .nb-raw{font-size:11px;color:var(--text-faint);background:rgba(0,0,0,.4);border:1px dashed var(--border);border-radius:6px;padding:8px 12px;text-align:left;width:100%;max-height:120px;overflow-y:auto;white-space:pre-wrap;font-family:monospace}
+.narration-blocked .nb-actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:6px}
+.narration-blocked .nb-hint{font-size:11px;color:var(--text-faint);line-height:1.6}
+
 /* ============================ 抽屉 · 世界志 ============================ */
 .drawer-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;display:none;backdrop-filter:blur(2px)}
 .drawer-overlay.show{display:block}
@@ -323,7 +334,7 @@ input,textarea,select{font-family:inherit;color:var(--text)}
     <button class="btn ghost sm" id="btn-quick-solo" style="display:none">快速单人（V3）</button>
   </div>
 
-  <div class="intro-foot">断网或无 API 时自动回退本地叙事 · 游戏始终可玩</div>
+  <div class="intro-foot">V3.3 · 叙事事务化：AI 是必需品，模型失败时本回合状态保留等待重试</div>
 </div>
 
 <!-- ============== 房间大厅 ============== -->
@@ -430,7 +441,7 @@ input,textarea,select{font-family:inherit;color:var(--text)}
     </div>
     <div class="tb-right">
       <span class="phase-pill" id="phase-pill">—</span>
-      <span class="api-status" id="ai-status" title="点击设置可查看诊断">AI：本地</span>
+      <span class="api-status" id="ai-status" title="点击设置可查看诊断">AI：未配置</span>
       <button class="btn ghost sm" id="btn-archive">世界志</button>
       <button class="btn ghost sm" id="btn-save">存档</button>
       <button class="btn ghost sm" id="btn-regen">重写本章</button>
@@ -462,6 +473,20 @@ input,textarea,select{font-family:inherit;color:var(--text)}
     <div class="computing" id="computing" style="display:none">
       <div class="spinner"></div>
       <div class="ctxt">天机演算中……</div>
+    </div>
+
+    <!-- V3.3 天机未应面板：AI 失败时显示，本回合状态保留等待重试 -->
+    <div class="narration-blocked" id="narration-blocked" style="display:none">
+      <div class="nb-icon">✕</div>
+      <div class="nb-title">天机未应</div>
+      <div class="nb-sub">AI 文本生成失败，本回合状态已保留。世界、场景、选项均未推进，可重试或换模型。</div>
+      <div class="nb-detail" id="nb-detail"></div>
+      <div class="nb-raw" id="nb-raw" style="display:none"></div>
+      <div class="nb-actions">
+        <button class="btn primary sm" id="btn-retry-narration">重试本回合</button>
+        <button class="btn ghost sm" id="btn-retry-other-model">换模型重试</button>
+      </div>
+      <div class="nb-hint" id="nb-hint"></div>
     </div>
 
     <div class="turn-waiting" id="turn-waiting">
@@ -503,9 +528,9 @@ input,textarea,select{font-family:inherit;color:var(--text)}
     <h3>设置 · AI 与叙事</h3>
     <div class="modal-body">
       <div class="form-row">
-        <label>启用 AI 叙事（断网自动回退本地）</label>
-        <select id="set-ai-on"><option value="0">关闭（纯离线）</option><option value="1">开启</option></select>
-        <div class="hint">开启后每回合调用一次叙事 API；失败/超时回退本地模板，游戏照常进行。</div>
+        <label>启用 AI 叙事（V3.3 起为必需品）</label>
+        <select id="set-ai-on"><option value="1">开启</option></select>
+        <div class="hint">V3.3 起 AI 是叙事必需品：每回合调用一次叙事 API；模型失败时本回合状态保留，显示"天机未应"等待手动重试，不自动降级到本地模板。</div>
       </div>
       <div class="form-row">
         <label>OpenAI 兼容接口 Base URL</label>
@@ -548,9 +573,9 @@ input,textarea,select{font-family:inherit;color:var(--text)}
 
 <div class="toast" id="toast"></div>
 
-<script src="game-core.js?v=3.1.6"></script>
-<script src="story-core.js?v=3.1.6"></script>
-<script src="room-core.js?v=3.1.6"></script>
+<script src="game-core.js?v=3.3.0"></script>
+<script src="story-core.js?v=3.3.0"></script>
+<script src="room-core.js?v=3.3.0"></script>
 <script>
 /* ============================================================
  * V3 UI 控制层
@@ -650,6 +675,7 @@ UI.renderChapter = function () {
   UI.renderChapterEcho();
   UI.renderChoices();
   UI.renderLegacy();
+  UI.renderNarrationBlocked();
 };
 
 UI.renderChapterEcho = function () {
@@ -749,6 +775,71 @@ UI.showComputing = function (on) {
   document.getElementById('choice-section').style.display = on ? 'none' : '';
   document.getElementById('phase-pill').textContent = on ? '天机演算' : '阅读';
   document.getElementById('phase-pill').className = on ? 'phase-pill narrating' : 'phase-pill';
+};
+
+/* V3.3 天机未应面板渲染 */
+UI.renderNarrationBlocked = function () {
+  var box = document.getElementById('narration-blocked');
+  if (!box) return;
+  var phase = Story.getTurnPhase();
+  if (phase !== 'awaiting_narration') {
+    box.style.display = 'none';
+    document.getElementById('choice-section').style.display = '';
+    document.getElementById('computing').style.display = 'none';
+    return;
+  }
+  var pr = Story.getPendingResolution();
+  var err = pr && pr.lastNarrationError ? pr.lastNarrationError : null;
+  // 隐藏章节正文、选项、computing，显示天机未应
+  box.style.display = 'flex';
+  document.getElementById('choice-section').style.display = 'none';
+  document.getElementById('computing').style.display = 'none';
+  document.getElementById('phase-pill').textContent = '天机未应';
+  document.getElementById('phase-pill').className = 'phase-pill narrating';
+  var detail = document.getElementById('nb-detail');
+  var html = '';
+  if (err) {
+    html += '<div>错误码：<b>' + (err.code || 'UNKNOWN') + '</b></div>';
+    html += '<div>原因：' + UI._errorCodeReason(err.code) + '</div>';
+    html += '<div>详情：' + UI._desensitize(err.message || '') + '</div>';
+  }
+  html += '<div>已重试：' + (pr ? pr.retryCount : 0) + ' 次</div>';
+  detail.innerHTML = html;
+  var raw = document.getElementById('nb-raw');
+  if (err && err.rawPreview) {
+    raw.textContent = String(err.rawPreview).slice(0, 300);
+    raw.style.display = 'block';
+  } else {
+    raw.style.display = 'none';
+  }
+  var hint = document.getElementById('nb-hint');
+  if (pr && pr.retryCount >= 3) {
+    hint.textContent = '已重试 ' + pr.retryCount + ' 次，建议检查 API 配置或换模型。按钮仍可继续重试。';
+  } else {
+    hint.textContent = '世界、场景、选项均未推进，可重试或换模型。';
+  }
+};
+
+UI._retryNarration = function (options) {
+  var btn = document.getElementById('btn-retry-narration');
+  var btn2 = document.getElementById('btn-retry-other-model');
+  if (btn) btn.disabled = true;
+  if (btn2) btn2.disabled = true;
+  UI.showComputing(true);
+  document.getElementById('narration-blocked').style.display = 'none';
+  var fn = (UI._room && UI._room.roomId && Room.coordinator.retryNarration)
+    ? Room.coordinator.retryNarration(UI._room.roomId, options || {})
+    : Story.retryNarration(Story.state, options || {});
+  Promise.resolve(fn).then(function () {
+    UI.renderChapter();
+    UI.renderAIStatus();
+    UI.renderNarrationBlocked();
+  }).catch(function (e) {
+    UI.toast('重试失败：' + (e && e.message ? e.message : e));
+  }).then(function () {
+    if (btn) btn.disabled = false;
+    if (btn2) btn2.disabled = false;
+  });
 };
 
 /* ---------- 推进回合 ---------- */
@@ -916,10 +1007,25 @@ UI.renderDrawer = function () {
   const arch = Story.getWorldArchive();
   if (!arch) { body.innerHTML = '<div class="arch-empty">尚未开局。</div>'; return; }
   if (tab === 'cast') {
-    body.innerHTML = '<h4>本章人物</h4><div class="arch-cast">' + arch.cast.map(function (a) {
-      return '<div class="cast-card"><div class="cn">' + UI.esc(a.name) + ' <span style="font-size:11px;color:var(--text-dim)">·' + UI.esc(a.daoPath) + '</span></div>' +
+    // V3.3 Phase 3：场景实体与出口（对象化展示）
+    var sceneHtml = '';
+    if (arch.scene) {
+      var entList = arch.scene.entities.map(function (e) { return UI.esc(e.name) + '<span style="color:var(--text-faint)">[' + UI.esc(e.kind) + ']</span>'; }).join('、') || '<span style="color:var(--text-faint)">无</span>';
+      var exitList = arch.scene.exits.map(function (e) { return UI.esc(e.name); }).join('、') || '<span style="color:var(--text-faint)">无</span>';
+      var dl = arch.scene.deadline ? ' · 期限 ' + UI.esc(arch.scene.deadline.type) + ' 余 ' + arch.scene.deadline.remaining + arch.scene.deadline.unit : '';
+      sceneHtml = '<h4>当前场景 · ' + UI.esc(arch.scene.locationName) + ' <span style="font-size:10px;color:var(--text-dim)">压力 ' + arch.scene.pressure + dl + '</span></h4>' +
+        '<div class="scene-info" style="background:rgba(0,0,0,.2);border-left:2px solid var(--cyan);border-radius:0 5px 5px 0;padding:8px 11px;margin-bottom:8px"><div class="ci">可见：' + entList + '</div><div class="ci">出口：' + exitList + '</div></div>';
+      if (arch.assets && arch.assets.length) {
+        sceneHtml += '<div class="scene-info" style="background:rgba(0,0,0,.2);border-left:2px solid var(--gold);border-radius:0 5px 5px 0;padding:8px 11px;margin-bottom:8px"><div class="ci">资产：' + arch.assets.map(function (a) { return UI.esc(a.name) + '(' + UI.esc(a.state) + ')'; }).join('、') + '</div></div>';
+      }
+    }
+    body.innerHTML = sceneHtml + '<h4>本章人物</h4><div class="arch-cast">' + arch.cast.map(function (a) {
+      var fateLine = a.fateEcho ? '<div class="cr" style="color:var(--purple)">命盘：' + UI.esc(a.fateEcho) + '</div>' : '';
+      var presTag = a.presence === 'away' ? ' <span style="color:var(--red);font-size:10px">[离队]</span>' : '';
+      return '<div class="cast-card"><div class="cn">' + UI.esc(a.name) + presTag + ' <span style="font-size:11px;color:var(--text-dim)">·' + UI.esc(a.daoPath) + '</span></div>' +
         '<div class="ci">' + UI.esc(a.identity) + ' · ' + UI.esc(a.status) + '</div>' +
         '<div class="cw">愿：' + UI.esc(a.publicWish || '—') + '</div>' +
+        fateLine +
         (a.relationHints && Object.keys(a.relationHints).length ? '<div class="cr">关系：' + Object.keys(a.relationHints).map(function (k) { return UI.esc(k) + '(' + UI.esc(a.relationHints[k]) + ')'; }).join('、') + '</div>' : '') +
         '</div>';
     }).join('') + '</div>';
@@ -959,13 +1065,25 @@ UI.renderDrawer = function () {
       }).join('') + '</div>';
     }
     html += o.actors.map(function (a) {
-      return '<div class="omni-box"><div class="ot">' + UI.esc(a.name) + '</div>' +
+      var fp = a.fatePlate;
+      var fateDetail = fp ? '<div>命盘：' + UI.esc(fp.originStar) + '星 · ' + UI.esc(fp.karmicThread) + ' · ' + UI.esc(fp.hiddenMeridian) + ' · 命数' + fp.fateNumber + ' · ' + UI.esc(fp.lifeCurve) + '</div>' : '';
+      var pres = a.presence === 'away' ? ' <span style="color:var(--red)">[离队·' + UI.esc(a.locationId || '') + ']</span>' : '';
+      return '<div class="omni-box"><div class="ot">' + UI.esc(a.name) + pres + '</div>' +
         '<div>隐藏命数：' + UI.esc(a.hiddenFate || '—') + '</div>' +
+        fateDetail +
         '<div>上轮选择：' + UI.esc(a.aiChosenLastTurn || '—') + '</div>' +
         '<div>私密事实：' + (a.privateFacts.length ? a.privateFacts.map(UI.esc).join('；') : '无') + '</div>' +
         '<div>隐藏数值：境界 ' + UI.esc(a.hidden.realm) + ' · 修为 ' + a.hidden.cultivationProgress + ' · 伤势 ' + a.hidden.injury + '</div>' +
         '</div>';
     }).join('');
+    // V3.3 Phase 3：场景实体 + 资产全览
+    if (o.scene) {
+      html += '<h4>场景实体 · ' + UI.esc(o.scene.locationName) + '</h4><ul class="arch-list">' +
+        o.scene.entities.map(function (e) { return '<li>' + UI.esc(e.name) + ' [' + UI.esc(e.kind) + '] → ' + (e.affordances || []).map(UI.esc).join('/') + '</li>'; }).join('') + '</ul>';
+    }
+    if (o.assets && o.assets.length) {
+      html += '<h4>资产登记表</h4><ul class="arch-list">' + o.assets.map(function (a) { return '<li>' + UI.esc(a.name) + ' [' + UI.esc(a.kind) + '] · ' + UI.esc(a.state) + (a.ownerActorId ? ' · 持有 ' + UI.esc(a.ownerActorId) : '') + '</li>'; }).join('') + '</ul>';
+    }
     if (o.chronicleRumors && o.chronicleRumors.length) {
       html += '<h4>野史（扭曲传闻）</h4><ul class="arch-list">' + o.chronicleRumors.map(function (r) { return '<li>' + UI.esc(r.year + '年：' + r.text) + '</li>'; }).join('') + '</ul>';
     }
@@ -1174,7 +1292,7 @@ UI.renderAIStatus = function (status) {
   status = status || Story.getAIStatus();
   var badge = document.getElementById('ai-status');
   var detail = document.getElementById('set-ai-status');
-  var labels = { disabled:'本地', unavailable:'未连接', ready:'就绪', testing:'检测中', requesting:'请求中', retrying:'格式重试', received:'校验中', success:'已生成', fallback:'已回退' };
+  var labels = { disabled:'未配置', unavailable:'未连接', ready:'就绪', testing:'检测中', requesting:'请求中', retrying:'格式重试', received:'校验中', success:'已生成', fallback:'待重试' };
   var prov = (Story.state && Story.state.story && Story.state.story.currentChapter) ? Story.state.story.currentChapter.provenance : '';
   var provLabel = UI._provenanceLabel(prov, status);
   if (badge) {
@@ -1192,14 +1310,13 @@ UI.renderAIStatus = function (status) {
       diag.push('错误码：' + status.code);
       diag.push('原因：' + UI._errorCodeReason(status.code));
     }
-    var usedLocal = (prov && prov.indexOf('offline') === 0) || status.state === 'fallback';
-    diag.push('本地裁决：' + (usedLocal ? '是' : '否'));
+    diag.push('本地裁决：否（V3.3 纯 AI）');
     badge.title = diag.join('\n');
   }
   if (detail) {
     var detailText = status.message || '无状态';
     if (status.state === 'fallback' && status.code) {
-      detailText = 'AI 文本生成失败，已使用离线裁决摘要。原因：' + UI._errorCodeReason(status.code);
+      detailText = 'AI 文本生成失败，本回合状态已保留。原因：' + UI._errorCodeReason(status.code) + '。可在游戏界面点击"重试本回合"。';
     }
     detail.textContent = detailText + (status.error ? '\n错误：' + UI._desensitize(status.error) : '') +
       (status.model ? '\n模型：' + status.model : '') + (status.base ? '\n地址：' + status.base : '');
@@ -1633,6 +1750,7 @@ UI.renderRoomChapter = function () {
   UI.renderChapterEcho();
   UI.renderChoices();
   UI.renderLegacy();
+  UI.renderNarrationBlocked();
 };
 
 UI.renderRoomChoices = function () {
@@ -1954,6 +2072,12 @@ UI.init = function () {
   document.getElementById('btn-regen').addEventListener('click', UI.regenChapter);
   document.getElementById('btn-archive').addEventListener('click', UI.openDrawer);
   document.getElementById('btn-settings').addEventListener('click', UI.openSettings);
+  // V3.3 天机未应重试按钮
+  document.getElementById('btn-retry-narration').addEventListener('click', function () { UI._retryNarration({}); });
+  document.getElementById('btn-retry-other-model').addEventListener('click', function () {
+    var model = window.prompt('输入要切换的模型名（如 deepseek-chat、gpt-4o-mini）：', UI.settings.model || '');
+    if (model) { UI.settings.model = model; UI._saveSettings(); UI._retryNarration({ modelOverride: model }); }
+  });
   document.getElementById('drawer-close').addEventListener('click', UI.closeDrawer);
   document.getElementById('drawer-overlay').addEventListener('click', UI.closeDrawer);
   document.querySelectorAll('.drawer-tab').forEach(function (t) {

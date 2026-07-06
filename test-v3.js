@@ -12,6 +12,7 @@
  * ============================================================================
  */
 const Story = require('./story-core.js');
+const { setupMockAI } = require('./test-helpers.js');
 
 let pass = 0, fail = 0;
 function ok(name, cond, extra) {
@@ -54,9 +55,9 @@ sevenKeys.forEach(function (k) {
  * §2 开局：离线也能完整开局（V3 §11 Sprint A 验收）
  * ============================================================ */
 section('§2 开局 · 不开 API 也能开界→开局文→选择');
-Story.setAIEnabled(false);
+setupMockAI(Story);
 const state = await Story.startGame(seed, playerSetup);
-ok('开局返回 StoryState', !!state && state.version === '3.2.0');
+ok('开局返回 StoryState', !!state && state.version === '3.3.0', 'version=' + (state && state.version));
 ok('第一章已生成', !!state.story.currentChapter && !!state.story.currentChapter.title);
 ok('开局正文非空且够长', state.story.currentChapter.chapter.length > 100);
 ok('开局生成玩家 A/B/C 选项', (state.story.turnChoices.lu || []).length === 3);
@@ -91,7 +92,7 @@ ok('自定义行动不被额外解释 API 调用（直接进叙事上下文）',
  * §4 AI 同伴加权选择（V3 §5.2 + Sprint C 验收）
  * ============================================================ */
 section('§4 AI 同伴 · 加权选择 · 不调 API · 性格差异');
-Story.setAIEnabled(false);
+setupMockAI(Story);
 const s4 = await Story.startGame('AI-WEIGHT-9', playerSetup);
 // 跑 5 回合，收集 AI 选择
 const aiPicks = { han: {}, shen: {}, gu: {} };
@@ -131,7 +132,7 @@ ok('下章正文不直接展示 AI 选择编号', !leakPattern.test(ch3Text));
  * §5 确定性：续玩与连续游玩一致（V3 §2 保留确定性）
  * ============================================================ */
 section('§5 确定性 · 续玩与连续游玩一致');
-Story.setAIEnabled(false);
+setupMockAI(Story);
 const sA = await Story.startGame('DET-V3-3', playerSetup);
 await Story.playTurn({ choiceId: sA.story.turnChoices.lu[0].id });
 await Story.playTurn({ choiceId: Story.state.story.turnChoices.lu[0].id });
@@ -182,14 +183,18 @@ const slowP = Story.ai._withTimeout(new Promise(function () {}), 50);
 const slowR = await slowP;
 ok('超时返回 timeout 标记（回退本地）', slowR && slowR.__timeout === true);
 
-section('§6 API · 无效 JSON 回退模板');
+section('§6 API · Provider 抛错时 V3.3 不再回退离线模板');
+Story.setAIEnabled(true);
 Story.registerAIProvider({
   narrate: async function () { throw new Error('bad json'); },
-});
+}, { provider: 'throw', model: 'throw-m' });
 const s6b = await Story.startGame('API-BADJSON-2', playerSetup);
-ok('Provider 抛错时回退离线模板', !!s6b.story.currentChapter && s6b.story.currentChapter.chapter.length > 100);
+ok('Provider 抛错：开局停在 awaiting_narration', Story.getTurnPhase(s6b) === 'awaiting_narration', Story.getTurnPhase(s6b));
+ok('Provider 抛错：无 currentChapter（V3.3 无离线兜底）', !s6b.story.currentChapter);
+ok('Provider 抛错：pendingResolution 记录错误', !!Story.getPendingResolution(s6b) && !!Story.getPendingResolution(s6b).lastNarrationError);
 
 section('§6 API · API Key 不入存档与 localStorage');
+setupMockAI(Story);
 Story.setApiKey('sk-SECRET-V3-999');
 const sKey = await Story.startGame('KEY-V3-1', playerSetup);
 const saveStr = Story.save();
@@ -201,7 +206,7 @@ const settingsStr = (typeof localStorage !== 'undefined') ? localStorage.getItem
 ok('持久化设置不含 apiKey', !settingsStr || settingsStr.indexOf('sk-LEAK-V3') < 0);
 
 section('§6 API · 重新生成本章文案不改世界状态');
-Story.setAIEnabled(false);
+setupMockAI(Story);
 const sR = await Story.startGame('REGEN-1', playerSetup);
 const beforeChron = JSON.stringify(sR.story.chronicle);
 const beforeYear = sR.world.year;
@@ -214,7 +219,7 @@ ok('重新生成不改年份', Story.state.world.year === beforeYear);
  * §7 编年史与百年遗产（V3 §8 + §9 + Sprint D）
  * ============================================================ */
 section('§7 历史 · 自动编年史 + 百年遗产');
-Story.setAIEnabled(false);
+setupMockAI(Story);
 const s7 = await Story.startGame('LEGACY-V3-5', playerSetup);
 // 手动触发百年推进
 s7.settings.narrativePace = '史诗';
@@ -271,7 +276,7 @@ for (let i = 1; i < 5000; i++) {
 }
 ok('找到轮回紊乱·空岛海·妖族共治种子', !!foundSeed, '5000 次内未找到');
 if (foundSeed) {
-  Story.setAIEnabled(false);
+  setupMockAI(Story);
   const vSetup = {
     name: '陆知微', identity: '失忆剑修', daoPath: '剑修',
     publicWish: '寻回前世记忆', hiddenFate: '残剑呼唤着我的前世名字',

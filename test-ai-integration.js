@@ -29,7 +29,16 @@ async function main() {
   const Story = window.Story;
   const UI = window.eval('UI');
 
-  Story.setAIEnabled(false);
+  // V3.3：离线已废除，开局需 mock AI 产出章节，后续回合再切换到 fetch mock
+  Story.setAIEnabled(true);
+  Story.registerAIProvider({
+    narrate: async function () {
+      return JSON.stringify({
+        title: '梦钟初响',
+        chapter: '陆知微于雨夜入梦，远处钟声若隐若现，残剑微颤，似在回应某种未明的呼唤。众人各自歇下，却无人真的安眠。'.repeat(2),
+      });
+    },
+  }, { provider: 'mock', model: 'mock' });
   await Story.startGame('AI-INTEGRATION', {
     name: '陆知微', identity: '外门弟子', daoPath: '剑修',
     publicWish: '查明钟声来源', hiddenFate: '残剑认主', personalityTags: ['敏锐'],
