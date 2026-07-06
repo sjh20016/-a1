@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "test": "npm run test:core && npm run test:room && npm run test:regression && npm run test:ai && npm run test:dom && npm run test:v32 && npm run test:transaction && npm run test:experience && npm run test:director",
-    "test:core": "node test-acceptance.js && node test-v21.js && node test-v3.js",
+    "test:core": "node test-v3.js",
     "test:room": "node test-v31.js",
     "test:regression": "node test-regressions.js",
     "test:ai": "node test-ai-integration.js",

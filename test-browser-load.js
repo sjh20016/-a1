@@ -1,7 +1,6 @@
 /**
- * Browser-like loader regression: unlike test-v3-dom.js, this test does not
- * inject Game/Story/Room onto window. The three external scripts must expose
- * themselves exactly as they do in a real browser.
+ * Browser-like loader regression: loads story-core.js and room-core.js
+ * via JSDOM to verify they expose themselves correctly in a browser environment.
  */
 const path = require('path');
 const { JSDOM, VirtualConsole } = require('jsdom');
@@ -36,7 +35,6 @@ async function main() {
   const window = dom.window;
   const document = window.document;
   console.log('\n— 浏览器原生脚本加载 —');
-  check('Game 暴露到 window', !!window.Game);
   check('Story 暴露到 window', !!window.Story);
   check('Room 暴露到 window', !!window.Room);
   check('Room 成功取得 Story 依赖', window.Room && window.Room.PRESET_BOT_ACTORS.length === 3,

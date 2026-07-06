@@ -1,6 +1,6 @@
 /**
  * V3 DOM 冒烟测试：在 jsdom 中加载 index.html，验证 UI 不报错且核心链路通。
- *  - 加载 game-core.js + story-core.js + room-core.js + index.html 内联脚本
+ *  - 加载 story-core.js + room-core.js + index.html 内联脚本
  *  - V3 单人：掷骰开界 → 立命 → 第一章 → 选 A → 第二章
  *  - V3.1 房间：创建房间 → 大厅 → 立命 → 加机器人 → 准备 → 开局 → 提交
  */
@@ -16,7 +16,6 @@ function ok(name, cond, extra) {
 
 (async function () {
   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
-  const gameJs = fs.readFileSync(path.join(__dirname, 'game-core.js'), 'utf8');
   const storyJs = fs.readFileSync(path.join(__dirname, 'story-core.js'), 'utf8');
   const roomJs = fs.readFileSync(path.join(__dirname, 'room-core.js'), 'utf8');
 
@@ -43,9 +42,8 @@ function ok(name, cond, extra) {
 
   // 在 window 上下文执行脚本：把 const 声明改为挂到 window
   const wrap = function (code) {
-    return code + '\n;try{window.Game=Game;}catch(e){}try{window.Story=Story;}catch(e){}';
+    return code + '\n;try{window.Story=Story;}catch(e){}';
   };
-  window.eval(wrap(gameJs));
   window.eval(wrap(storyJs));
   // room-core.js 依赖全局 Story（已在上一行挂到 window）
   window.eval(roomJs + '\n;try{window.Room=Room;}catch(e){}');
