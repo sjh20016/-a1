@@ -49,6 +49,8 @@ async function main() {
   d.candidates = Story.Director.generateCandidates(state);
   d.phase = 'voting';
   Story.Director.activateArc(state, d.candidates[0].arcId);
+  Story.Director.applyOpeningSeed(state, d.activeArc);
+  Story._writeChoices(state, Story.ChoiceFactory.buildAll(state, state.story.currentScene, null));
   ok('事务测试初始状态：activeArc 已激活', d.activeArc !== null && d.phase === 'active');
 
   // 快照初始 Director 状态
@@ -90,15 +92,60 @@ async function main() {
   d2.candidates = Story.Director.generateCandidates(state2);
   d2.phase = 'voting';
   Story.Director.activateArc(state2, d2.candidates[0].arcId);
+  Story.Director.applyOpeningSeed(state2, d2.activeArc);
+  Story._writeChoices(state2, Story.ChoiceFactory.buildAll(state2, state2.story.currentScene, null));
 
   var snapBefore2 = snapshotDirector(state2);
   var choices2 = Story.getChoicesForActor(state2, 'lu');
   // 找一个 investigate 选项来触发 advance
-  var invChoice = choices2.find(function (c) { return c.intentCategory === 'investigate'; }) || choices2[0];
+  var invChoice = choices2.find(function (c) { return c.directorRole === 'arc'; }) ||
+    choices2.find(function (c) { return c.intentCategory === 'investigate'; }) ||
+    choices2[0];
+  ok('真实回合存在可提交选项', !!invChoice);
   await Story.resolveTurn(state2, { lu: { choiceId: invChoice.id } });
 
   var snapAfter2 = snapshotDirector(state2);
-  ok('AI 成功后 DirectorPlan 已应用（phase 或 beat 有变化）', true);
+  ok('AI 成功后 currentBeatIndex 已变化', snapAfter2.currentBeatIndex !== snapBefore2.currentBeatIndex,
+    'before=' + snapBefore2.currentBeatIndex + ' after=' + snapAfter2.currentBeatIndex);
+  ok('AI 成功后 divergenceLog +1', snapAfter2.divergenceLogLen === snapBefore2.divergenceLogLen + 1,
+    'before=' + snapBefore2.divergenceLogLen + ' after=' + snapAfter2.divergenceLogLen);
+  ok('AI 成功后 lastDirectorEvent.result = advance',
+    state2.story.director.lastDirectorEvent && state2.story.director.lastDirectorEvent.result === 'advance',
+    state2.story.director.lastDirectorEvent ? state2.story.director.lastDirectorEvent.result : 'null');
+  ok('AI 成功后 pendingResolution 已清空', Story.getPendingResolution(state2) === null);
+
+  // ---- 4. AI 提前揭露 forbiddenReveals：停在 narration_failed，不应用 DirectorPlan ----
+  var state3 = await Story.startGame('DIRECTOR-TX-FORBIDDEN', playerSetup);
+  var d3 = state3.story.director;
+  d3.candidates = Story.Director.generateCandidates(state3);
+  d3.phase = 'voting';
+  Story.Director.activateArc(state3, d3.candidates[0].arcId);
+  Story.Director.applyOpeningSeed(state3, d3.activeArc);
+  Story._writeChoices(state3, Story.ChoiceFactory.buildAll(state3, state3.story.currentScene, null));
+  var forbidden = d3.activeArc.beats[d3.activeArc.currentBeatIndex].forbiddenReveals[0];
+  Story.registerAIProvider({
+    narrate: async function () {
+      return JSON.stringify({
+        title: '提前泄密',
+        chapter: ('这一章表面推进行动，暗中却直接写出了' + forbidden + '，导致当前 Beat 的禁止揭露被命中。').repeat(3),
+        dialogues: [],
+        endingImage: '',
+      });
+    },
+  }, { provider: 'leak', model: 'leak' });
+  Story.setAIEnabled(true);
+  var snapBefore3 = snapshotDirector(state3);
+  var choices3 = Story.getChoicesForActor(state3, 'lu');
+  var arcChoice3 = choices3.find(function (c) { return c.directorRole === 'arc'; }) || choices3[0];
+  await Story.resolveTurn(state3, { lu: { choiceId: arcChoice3.id } });
+  var snapAfter3 = snapshotDirector(state3);
+  var pending3 = Story.getPendingResolution(state3);
+  ok('命中 forbiddenReveals 后停在 narration_failed', Story.getTurnPhase(state3) === 'narration_failed');
+  ok('命中 forbiddenReveals 后 DirectorPlan 不应用', snapAfter3.currentBeatIndex === snapBefore3.currentBeatIndex);
+  ok('命中 forbiddenReveals 后 pendingResolution 保留', !!pending3);
+  ok('命中 forbiddenReveals 错误码正确',
+    pending3 && pending3.lastNarrationError && pending3.lastNarrationError.code === 'FORBIDDEN_REVEAL',
+    pending3 && pending3.lastNarrationError ? pending3.lastNarrationError.code : 'null');
 
   console.log('\n' + '  Director 事务测试通过 ' + pass + ' / 失败 ' + fail);
   if (fail) process.exitCode = 1;

@@ -87,6 +87,18 @@ async function main() {
   ok('selectedArcId 已设置', room.directorVote.selectedArcId !== null);
   ok('selectedArcId 是候选之一', candidates.some(function (c) { return c.arcId === room.directorVote.selectedArcId; }));
   ok('storySession 已有 currentChapter', !!room.storySession && !!room.storySession.story.currentChapter);
+  var selected = candidates.find(function (c) { return c.arcId === room.directorVote.selectedArcId; });
+  var selectedRecipe = selected && Story.DirectorRecipes[selected.recipeId];
+  var sceneEntityIds = (room.storySession.story.currentScene.visibleEntities || []).map(function (e) { return e.id; });
+  var seedEntityIds = selectedRecipe.openingSeed.addEntities.map(function (e) { return e.id; });
+  ok('选中卷纲 openingSeed 实体已进入开局场景',
+    seedEntityIds.every(function (id) { return sceneEntityIds.indexOf(id) >= 0; }),
+    'seed=' + seedEntityIds.join(',') + ' scene=' + sceneEntityIds.join(','));
+  var threadIds = (room.storySession.story.activeThreads || []).map(function (t) { return t.threadId; });
+  var seedThreadIds = selectedRecipe.openingSeed.addThreads.map(function (t) { return t.threadId; });
+  ok('选中卷纲 openingSeed 线程已进入 activeThreads',
+    seedThreadIds.every(function (id) { return threadIds.indexOf(id) >= 0; }),
+    'seed=' + seedThreadIds.join(',') + ' threads=' + threadIds.join(','));
 
   // ---- 7. 非投票阶段投票被拒绝 ----
   var room2 = Room.coordinator.createRoom({

@@ -57,7 +57,7 @@ sevenKeys.forEach(function (k) {
 section('§2 开局 · 不开 API 也能开界→开局文→选择');
 setupMockAI(Story);
 const state = await Story.startGame(seed, playerSetup);
-ok('开局返回 StoryState', !!state && state.version === '3.3.0', 'version=' + (state && state.version));
+ok('开局返回 StoryState', !!state && state.version === Story.VERSION, 'version=' + (state && state.version));
 ok('第一章已生成', !!state.story.currentChapter && !!state.story.currentChapter.title);
 ok('开局正文非空且够长', state.story.currentChapter.chapter.length > 100);
 ok('开局生成玩家 A/B/C 选项', (state.story.turnChoices.lu || []).length === 3);

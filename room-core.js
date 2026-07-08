@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * 《修行局》V3.1 — 房间化协调器（room-core.js）
+ * 《修行局》V3.3.3 — 房间化协调器 + 卷纲导演投票入口（room-core.js）
  * ============================================================================
  * 职责：管理房间、席位、角色绑定、回合收集、机器人自动落子、统一结算。
  *   Story 只负责叙事，Room 负责秩序与隐私。
@@ -10,7 +10,7 @@
  *
  * 本阶段（Sprint 2）实现：
  *   - RoomState / RoomSeat 数据结构
- *   - LocalRoomCoordinator（创建/加入/准备/开局/提交/机器人/结算）
+ *   - LocalRoomCoordinator（创建/加入/准备/开局/卷纲投票/提交/机器人/结算）
  *   - RoomView.getForSeat（按席位过滤隐私视图）
  *   - 本地存档与恢复
  *
@@ -31,7 +31,7 @@ const Room = {};
     : (typeof globalThis !== 'undefined' ? globalThis.Story : null);
   if (!Story) throw new Error('story-core.js must be loaded before room-core.js');
 
-  Room.VERSION = '3.1.0';
+  Room.VERSION = '3.3.3';
   Room.MAX_SEATS = 4;
 
   /** 机器人策略模板（影响描述与未来权重，当前决策由 Story.aiChoose 执行） */
@@ -67,7 +67,7 @@ const Room = {};
         narrativePace: config.narrativePace || '常规',
         allowCustomActions: config.allowCustomActions !== false,
         allowSpectators: !!config.allowSpectators,
-        aiNarrationMode: config.aiNarrationMode || 'offline',  // offline | host-byok
+        aiNarrationMode: config.aiNarrationMode || 'host-byok',  // host-byok | offline
       },
       seats: [],
       storySession: null,                       // StoryState（开局后填充）
@@ -515,7 +515,7 @@ const Room = {};
       if (!room.turn) room.turn = { turnId: '', round: 0, phase: 'idle', openedAt: 0, lockedAt: 0, submittedActorIds: [], actionsByActorId: {}, botStatusByActorId: {}, resolutionId: null };
       if (room.turn.lastError === undefined) room.turn.lastError = null;
       if (!room.eventLog) room.eventLog = [];
-      if (!room.settings) room.settings = { seed: '', narrativePace: '常规', allowCustomActions: true, allowSpectators: false, aiNarrationMode: 'offline' };
+      if (!room.settings) room.settings = { seed: '', narrativePace: '常规', allowCustomActions: true, allowSpectators: false, aiNarrationMode: 'host-byok' };
       room._pending = null;
       // 恢复 Story RNG
       if (room.storySession) {
@@ -1116,7 +1116,7 @@ const Room = {};
       var story = room.storySession;
       var legacy = story.finalLegacy || (Story.generateLegacy ? Story.generateLegacy(story) : null);
       var pack = {
-        packVersion: '3.1.0',
+        packVersion: Room.VERSION,
         roomId: room.roomId,
         seed: room.settings.seed,
         mode: room.mode,

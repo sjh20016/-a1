@@ -281,7 +281,7 @@ function ok(name, cond, extra) {
   UI.room = null;
   UI.viewerSeatId = null;
   UI.continueGame();
-  ok('continueGame 迁移 V3 存档为房间', !!UI.room && UI.room.schemaVersion === '3.1.0');
+  ok('continueGame 迁移 V3 存档为房间', !!UI.room && UI.room.schemaVersion === Room.VERSION);
   ok('迁移后写入 V3.1 存档', Room.RoomSave.hasSave() === true);
   ok('迁移后第一席为真人', UI.room.seats[0].kind === 'human');
 

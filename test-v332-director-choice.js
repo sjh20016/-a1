@@ -35,12 +35,22 @@ async function main() {
   d.candidates = Story.Director.generateCandidates(state);
   d.phase = 'voting';
   Story.Director.activateArc(state, d.candidates[0].arcId);
+  Story.Director.applyOpeningSeed(state, d.activeArc);
+  Story._writeChoices(state, Story.ChoiceFactory.buildAll(state, state.story.currentScene, null));
 
   // ---- 2. 每回合最多一项 arc 选项 ----
   var choices = Story.getChoicesForActor(state, 'lu');
   ok('getChoicesForActor 返回选项', choices && choices.length > 0);
   var arcChoices = choices.filter(function (c) { return c.directorRole === 'arc'; });
   ok('每回合最多一项 arc 选项', arcChoices.length <= 1, 'arcChoices=' + arcChoices.length);
+  ok('当前 Beat 主动生成 arc 选项', arcChoices.length === 1);
+  if (arcChoices[0]) {
+    var beat0 = d.activeArc.beats[d.activeArc.currentBeatIndex];
+    var matchTarget = (beat0.advanceSignals.targets || []).indexOf(arcChoices[0].targetId) >= 0 ||
+      (beat0.advanceSignals.categories || []).indexOf(arcChoices[0].intentCategory) >= 0;
+    ok('arc 选项命中当前 Beat 信号', matchTarget,
+      'target=' + arcChoices[0].targetId + ' category=' + arcChoices[0].intentCategory);
+  }
 
   // ---- 3. 至少一项 scene 或 character 选项 ----
   var nonArcChoices = choices.filter(function (c) { return c.directorRole !== 'arc'; });

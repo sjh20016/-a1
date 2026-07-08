@@ -42,7 +42,7 @@ async function main() {
   const room = Room.coordinator.createRoom({
     hostName: 'Howjim', mode: 'local-hotseat', seed: 'ROOM-TEST-1',
   });
-  ok('房间创建返回 RoomState', !!room && room.schemaVersion === '3.1.0');
+  ok('房间创建返回 RoomState', !!room && room.schemaVersion === Room.VERSION);
   ok('房间默认 4 席位', room.seats.length === 4);
   ok('房主占第一席', room.seats[0].kind === 'human' && room.seats[0].displayName === 'Howjim');
   ok('其余席位为空', room.seats[1].kind === 'empty' && room.seats[2].kind === 'empty' && room.seats[3].kind === 'empty');
@@ -231,7 +231,7 @@ async function main() {
   ok('存档返回非空字符串', typeof saveStr === 'string' && saveStr.length > 0);
   ok('存档不含 apiKey', saveStr.indexOf('apiKey') < 0 && saveStr.indexOf('sk-') < 0);
   const parsed = JSON.parse(saveStr);
-  ok('存档含 room 结构', !!parsed.room && parsed.saveVersion === '3.1.0');
+  ok('存档含 room 结构', !!parsed.room && parsed.saveVersion === Room.VERSION);
   ok('存档含 storySession', !!parsed.room.storySession);
   ok('存档含席位', parsed.room.seats.length === 4);
 
@@ -283,7 +283,7 @@ async function main() {
   ok('V3 存档已生成', typeof v3Save === 'string' && v3Save.length > 0);
 
   const migrated = Room.coordinator.migrateFromV3(v3Save);
-  ok('V3 存档迁移成功', !!migrated && migrated.schemaVersion === '3.1.0');
+  ok('V3 存档迁移成功', !!migrated && migrated.schemaVersion === Room.VERSION);
   ok('迁移后第一席为真人', migrated.seats[0].kind === 'human');
   ok('迁移后其余为 Bot', migrated.seats[1].kind === 'bot' && migrated.seats[2].kind === 'bot');
   ok('迁移后故事会话完整', !!migrated.storySession && migrated.storySession.actors.length === 4);
@@ -321,7 +321,7 @@ async function main() {
   ok('存档不含 apiKey', saveData.indexOf('apiKey') < 0 && saveData.indexOf('sk-') < 0);
   ok('hasSave 为 true', Room.RoomSave.hasSave() === true);
   const parsedSave = JSON.parse(saveData);
-  ok('存档含 saveVersion 3.1.0', parsedSave.saveVersion === '3.1.0');
+  ok('存档含当前 saveVersion', parsedSave.saveVersion === Room.VERSION);
   ok('存档含 snapshotAt', typeof parsedSave.snapshotAt === 'number');
 
   // 清掉内存中的房间，再读档恢复
@@ -359,7 +359,7 @@ async function main() {
   const packJson = Room.RoomSave.exportWorldLegacy(loaded.roomId);
   ok('世界遗产包为 JSON 字符串', typeof packJson === 'string');
   const pack = JSON.parse(packJson);
-  ok('遗产包 packVersion 3.1.0', pack.packVersion === '3.1.0');
+  ok('遗产包 packVersion 为当前版本', pack.packVersion === Room.VERSION);
   ok('遗产包含种子', pack.seed === loaded.settings.seed);
   ok('遗产包含世界', !!pack.world && !!pack.world.name);
   ok('遗产包含角色（4）', pack.actors.length === 4);
@@ -375,7 +375,7 @@ async function main() {
   const v3Read = Room.RoomSave.readV3Save();
   ok('readV3Save 返回原始字符串', typeof v3Read === 'string' && v3Read.length > 0);
   const migratedSave = Room.RoomSave.migrate(v3Read);
-  ok('RoomSave.migrate 返回房间', !!migratedSave && migratedSave.schemaVersion === '3.1.0');
+  ok('RoomSave.migrate 返回房间', !!migratedSave && migratedSave.schemaVersion === Room.VERSION);
   ok('迁移后第一席为真人', migratedSave.seats[0].kind === 'human');
 
   section('§10 RoomSave · clear');
@@ -397,7 +397,7 @@ async function main() {
 
   // 通过 Transport 命令创建房间
   const tr = T.sendSync({ type: 'createRoom', config: { hostName: '甲', mode: 'local-solo', seed: 'TRANSPORT-1' } });
-  ok('createRoom 命令返回房间', !!tr && tr.schemaVersion === '3.1.0');
+  ok('createRoom 命令返回房间', !!tr && tr.schemaVersion === Room.VERSION);
 
   // 加机器人
   T.sendSync({ type: 'addBotSeat', roomId: tr.roomId, seatIndex: 1, botConfig: { presetIndex: 0 } });

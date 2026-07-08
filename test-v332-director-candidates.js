@@ -65,6 +65,8 @@ async function main() {
   var state2 = makeState('DIRECTOR-CAND-01');
   var c1 = Story.Director.generateCandidates(state1);
   var c2 = Story.Director.generateCandidates(state2);
+  ok('Recipe 池至少 10 条', Object.keys(Story.DirectorRecipes).length >= 10,
+    'count=' + Object.keys(Story.DirectorRecipes).length);
   ok('同种子候选数相同', c1.length === c2.length, 'c1=' + c1.length + ' c2=' + c2.length);
   ok('同种子候选 arcId 相同', c1.every(function (c, i) { return c.arcId === c2[i].arcId; }));
 
@@ -79,11 +81,7 @@ async function main() {
   ok('三张候选标题不重复', uniqueTitles.length === 3, 'titles=' + titles.join(','));
 
   // ---- 4. 候选至少覆盖两类 ----
-  var hasMystery = families.indexOf('mystery') >= 0;
-  var hasIntrigue = families.indexOf('intrigue') >= 0;
-  var hasConflict = families.indexOf('conflict') >= 0;
-  var hasExploration = families.indexOf('exploration') >= 0;
-  var coverageCount = [hasMystery, hasIntrigue, hasConflict, hasExploration].filter(Boolean).length;
+  var coverageCount = uniqueFamilies.length;
   ok('候选覆盖至少两类题材', coverageCount >= 2, 'coverage=' + coverageCount);
 
   // ---- 5. 世界骰影响权重但不锁死 ----
@@ -96,23 +94,25 @@ async function main() {
     'relic=' + scores.relic_identity + ' tower=' + scores.tower_expedition);
 
   // ---- 6. 不同种子候选组合可能变化 ----
-  var state3 = makeState('DIRECTOR-CAND-99');
-  state3.world.worldBible.heavenlyLaw = '时空紊乱';
-  state3.world.worldBible.storyGravity = '探索';
-  state3.actors[0].daoPath = '游侠';
-  state3.actors[0].publicWish = '开拓未知秘境';
-  var c3 = Story.Director.generateCandidates(state3);
-  var sameAll = true;
-  for (var i = 0; i < c1.length; i++) {
-    if (c1[i].arcId !== c3[i].arcId) { sameAll = false; break; }
-  }
-  // 不同权重下，候选组合应当不同（但 4 选 3 的组合数有限，可能碰巧相同）
-  ok('不同种子下候选组合可能不同', true); // 免责声明：4 选 3 组合有限
+  var signatures = {};
+  ['DIRECTOR-CAND-99', 'DIRECTOR-CAND-100', 'DIRECTOR-CAND-101', 'DIRECTOR-CAND-102'].forEach(function (seed) {
+    var st = makeState(seed);
+    st.world.worldBible.heavenlyLaw = '时空紊乱';
+    st.world.worldBible.storyGravity = '探索';
+    st.actors[0].daoPath = '游侠';
+    st.actors[0].publicWish = '开拓未知秘境';
+    var sig = Story.Director.generateCandidates(st).map(function (c) { return c.arcId; }).join('|');
+    signatures[sig] = true;
+  });
+  ok('不同种子下候选组合有实际变化', Object.keys(signatures).length >= 2,
+    'signatures=' + Object.keys(signatures).join(' / '));
 
   // ---- 7. activateArc 测试 ----
   var state4 = makeState('DIRECTOR-ACTIVATE');
   state4.story.director.candidates = c1;
   state4.story.director.phase = 'voting';
+  var threadCountBefore = state4.story.activeThreads.length;
+  var entityCountBefore = state4.story.currentScene.visibleEntities.length;
   var arc = Story.Director.activateArc(state4, c1[0].arcId);
   var d = state4.story.director;
   ok('activateArc 返回 arc', !!arc);
@@ -129,10 +129,14 @@ async function main() {
   ok('dormantArcs 有 wakeConditions', d.dormantArcs.every(function (da) { return da.wakeConditions && da.wakeConditions.length > 0; }));
   ok('dormantArcs 不包含 activeArc', d.dormantArcs.every(function (da) { return da.arcId !== d.activeArc.arcId; }));
 
-  // ---- 9. 线程已创建 ----
-  ok('activeThreads 增加了线程', state4.story.activeThreads.length > 0);
+  // ---- 9. openingSeed 延后到 applyOpeningSeed ----
+  ok('activateArc 不直接写 activeThreads', state4.story.activeThreads.length === threadCountBefore);
+  ok('activateArc 不直接写 currentScene 实体', state4.story.currentScene.visibleEntities.length === entityCountBefore);
+  Story.Director.applyOpeningSeed(state4, d.activeArc);
+  ok('applyOpeningSeed 后 activeThreads 增加', state4.story.activeThreads.length > threadCountBefore);
   var arcThreads = state4.story.activeThreads.filter(function (t) { return t.sourceArcId === d.activeArc.arcId; });
   ok('activeThreads 包含 arc 线程', arcThreads.length > 0);
+  ok('applyOpeningSeed 后场景实体增加', state4.story.currentScene.visibleEntities.length > entityCountBefore);
 
   console.log('\n' + '  Director 候选测试通过 ' + pass + ' / 失败 ' + fail);
   if (fail) process.exitCode = 1;

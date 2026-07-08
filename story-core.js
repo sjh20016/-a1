@@ -1,13 +1,13 @@
 /**
  * ============================================================================
- * 《修行局》V3.2 —— 本地裁决、AI 小说化、场景持续演化的叙事内核
+ * 《修行局》V3.3.3 —— 叙事事务化 + 共享场景 + 场景实体 + 卷纲导演真实接入
  * ============================================================================
- * 核心原则（V3.2）：
+ * 核心原则（V3.3.3）：
  *   先结算，后写文。先写账本，后写小说。
  *   玩家行动 → IntentParser 识别意图 → TurnResolver 本地确定结果/代价/时间/
  *   关系/世界变化 → StateDelta 写入账本与场景 → ChoiceFactory 本地生成下一轮选项
  *   → Narration.buildBrief → AI 只把既定事实写成小说（仅 title/chapter/dialogues/
- *   endingImage）；AI 失败则由 LocalNarrativeAssembler 离线组装。
+ *   endingImage）；AI 失败进入 narration_failed，不再使用玩家可见离线叙事。
  *   AI 不得改变任何世界状态；重新润色章节不得重新结算。
  *
  * 兼容：保留 V3/V3.1 全部公开 API（startGame/playTurn/save/load/reset/
@@ -16,7 +16,7 @@
  *
  * 命名空间：Story.Intent / Story.Scene / Story.Resolver / Story.Delta /
  *   Story.ChoiceFactory / Story.Agent / Story.Narration / Story.Provider /
- *   Story.Diagnostics / Story.Migration
+ *   Story.Diagnostics / Story.Migration / Story.Director
  * ============================================================================
  */
 
@@ -74,7 +74,7 @@ Story.createRng = function (seed, sub) {
  * §1 常量：七枚开界骰 / 地貌 / 天道 / 人格 / AI 同伴模板
  * ============================================================ */
 
-Story.VERSION = '3.3.0';
+Story.VERSION = '3.3.3';
 
 /** V3.3 回合状态机阶段（Narration Transaction） */
 Story.TURN_PHASES = ['collecting', 'locked', 'resolving', 'awaiting_narration', 'narration_failed', 'published'];
@@ -263,11 +263,11 @@ Story.FORBIDDEN_PHRASES = [
 
 Story._clone = function (o) { return JSON.parse(JSON.stringify(o)); };
 
-Story.createEmptyState = function () {
+Story.createEmptyState = function (seed) {
   return {
     version: Story.VERSION,
     world: {
-      seed: '', name: '', year: 1,
+      seed: seed || '', name: '', year: 1,
       worldBible: {},
       publicFacts: [],
       publicRumors: [],
@@ -649,6 +649,9 @@ Story._generateOpening = async function (state) {
   // 1. 创建开局场景与初始线索
   state.story.currentScene = Story.Scene.createOpeningScene(state);
   state.story.activeThreads = Story.Scene.createOpeningThreads(state);
+  if (state.story.director && state.story.director.activeArc) {
+    Story.Director.applyOpeningSeed(state, state.story.director.activeArc);
+  }
 
   // 2. 开局裁决（不依赖玩家行动，建立初始局面）—— 纯计算，不应用
   const envelope = Story.Resolver.buildOpeningEnvelope(state);
@@ -687,6 +690,11 @@ Story._generateOpening = async function (state) {
       rawPreview: '',
     };
     Story._setTurnPhase(state, 'narration_failed');
+    return;
+  }
+  const directorViolation = Story.Narration.validateAgainstDirector(narration, brief.director);
+  if (directorViolation) {
+    Story.Narration.failPendingForDirectorViolation(state, directorViolation, false);
     return;
   }
 
@@ -814,6 +822,11 @@ Story.retryNarration = async function (storyState, options) {
     Story._setTurnPhase(state, 'narration_failed');
     return null;
   }
+  const directorViolation = Story.Narration.validateAgainstDirector(narration, brief.director);
+  if (directorViolation) {
+    Story.Narration.failPendingForDirectorViolation(state, directorViolation, true);
+    return null;
+  }
 
   // 成功：提交
   return Story._commitPendingResolution(state, narration, isOpening);
@@ -934,6 +947,11 @@ Story.resolveTurn = async function (storyState, actionsByActorId) {
       rawPreview: '',
     };
     Story._setTurnPhase(state, 'narration_failed');
+    return state;
+  }
+  const directorViolation = Story.Narration.validateAgainstDirector(narration, brief.director);
+  if (directorViolation) {
+    Story.Narration.failPendingForDirectorViolation(state, directorViolation, false);
     return state;
   }
 
@@ -1639,8 +1657,372 @@ Story.DirectorRecipes = {
   },
 };
 
+Object.assign(Story.DirectorRecipes, {
+  demon_accord: {
+    id: 'demon_accord',
+    family: 'alliance',
+    title: '妖域盟约',
+    publicPitch: '边荒妖庭递来半枚骨盟，求援与陷阱只隔一层血誓。',
+    tags: ['妖族', '盟约', '边荒', '血誓'],
+    weightRules: {
+      aberrant: { '妖族': 4, '妖': 2 },
+      terrain: { '妖域': 3, '边荒': 2 },
+      storyGravity: { '游历': 2, '战争': 2 },
+    },
+    openingSeed: {
+      addEntities: [
+        { id: 'ent_demon_bone_oath', name: '半枚骨盟', kind: 'clue', affordances: ['investigate', 'observe'] },
+        { id: 'ent_border_envoy', name: '妖庭使者', kind: 'npc', affordances: ['social', 'negotiate', 'observe'] },
+      ],
+      addThreads: [
+        { threadId: 'thread_demon_accord', type: 'intrigue', title: '妖域盟约', stage: 1, maxStage: 3, status: 'active', urgency: 2, visibility: 'public' },
+        { threadId: 'thread_blood_oath_cost', type: 'mystery', title: '血誓代价', stage: 1, maxStage: 3, status: 'dormant', urgency: 1, visibility: 'hidden' },
+      ],
+      addClock: { clockId: 'clock_envoy_patience', label: '妖使耐心', current: 0, max: 3, onFull: 'divert' },
+    },
+    beats: [
+      {
+        beatId: 'demon_01', title: '骨盟入城',
+        dramaticGoal: '确认妖庭使者来意，分辨求援与试探。',
+        advanceSignals: { categories: ['social', 'investigate'], targets: ['ent_border_envoy', 'ent_demon_bone_oath'] },
+        bendSignals: { categories: ['negotiate', 'observe'], targets: ['thread_demon_accord'] },
+        stallSignals: { categories: ['rest', 'wait', 'cultivate'] },
+        shatterKeywords: ['杀死妖使', '撕毁骨盟', '交给宗门'],
+        allowedReveals: ['骨盟来自边荒妖庭', '妖使身上有旧伤'],
+        forbiddenReveals: ['骨盟真正受益者', '妖庭内乱真相'],
+        nextOnAdvance: 'demon_02', nextOnBend: 'demon_02', nextOnStall: 'demon_01', nextOnShatter: 'demon_01_shattered',
+      },
+      {
+        beatId: 'demon_02', title: '血誓裂痕',
+        dramaticGoal: '发现盟约的代价，并判断是否仍可合作。',
+        advanceSignals: { categories: ['investigate', 'negotiate'], targets: ['thread_blood_oath_cost', 'ent_demon_bone_oath'] },
+        bendSignals: { categories: ['social', 'deceive'], targets: ['ent_border_envoy'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['公开血誓', '背叛妖使', '献祭骨盟'],
+        allowedReveals: ['血誓会牵动双方气运', '盟约并非妖使一人能决定'],
+        forbiddenReveals: ['妖庭内乱主谋', '血誓完整仪式'],
+        nextOnAdvance: 'demon_03', nextOnBend: 'demon_03', nextOnStall: 'demon_02', nextOnShatter: 'demon_02_shattered',
+      },
+      {
+        beatId: 'demon_03', title: '盟或猎',
+        dramaticGoal: '决定与妖庭结盟、反制或借势脱身。',
+        advanceSignals: { categories: ['negotiate', 'travel'], targets: ['thread_demon_accord'] },
+        bendSignals: { categories: ['battle', 'deceive'], targets: ['ent_border_envoy'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['永绝妖域', '毁掉血誓', '屠灭使团'],
+        allowedReveals: ['盟约会改变边荒格局'],
+        forbiddenReveals: [],
+        nextOnAdvance: null, nextOnBend: null, nextOnStall: null, nextOnShatter: null,
+      },
+    ],
+  },
+  old_debt_revenge: {
+    id: 'old_debt_revenge',
+    family: 'revenge',
+    title: '旧债复仇',
+    publicPitch: '一张旧欠契从灰烬中现身，债主却早已死过一次。',
+    tags: ['旧债', '复仇', '欠契', '灰烬'],
+    weightRules: {
+      storyGravity: { '复仇': 4, '因果': 2 },
+      heavenlyLaw: { '因果': 3, '契约': 2 },
+      daoPath: { '剑修': 1, '游侠': 2 },
+    },
+    openingSeed: {
+      addEntities: [
+        { id: 'ent_ash_debt_note', name: '灰烬欠契', kind: 'clue', affordances: ['investigate', 'observe'] },
+        { id: 'ent_one_eyed_creditor', name: '独眼债使', kind: 'npc', affordances: ['social', 'negotiate', 'observe'] },
+      ],
+      addThreads: [
+        { threadId: 'thread_old_debt', type: 'mystery', title: '旧债未清', stage: 1, maxStage: 3, status: 'active', urgency: 2, visibility: 'public' },
+        { threadId: 'thread_dead_creditor', type: 'threat', title: '死过一次的债主', stage: 1, maxStage: 3, status: 'dormant', urgency: 1, visibility: 'hidden' },
+      ],
+      addClock: { clockId: 'clock_debt_collector', label: '债使逼近', current: 0, max: 4, onFull: 'divert' },
+    },
+    beats: [
+      {
+        beatId: 'debt_01', title: '灰契重现',
+        dramaticGoal: '弄清旧欠契为何落到众人手里。',
+        advanceSignals: { categories: ['investigate', 'social'], targets: ['ent_ash_debt_note', 'ent_one_eyed_creditor'] },
+        bendSignals: { categories: ['negotiate', 'observe'], targets: ['thread_old_debt'] },
+        stallSignals: { categories: ['rest', 'wait', 'cultivate'] },
+        shatterKeywords: ['烧掉欠契', '杀债使', '拒绝旧债'],
+        allowedReveals: ['欠契上有旧时代印记', '债使并非真正债主'],
+        forbiddenReveals: ['债主复生原因', '欠契完整名单'],
+        nextOnAdvance: 'debt_02', nextOnBend: 'debt_02', nextOnStall: 'debt_01', nextOnShatter: 'debt_01_shattered',
+      },
+      {
+        beatId: 'debt_02', title: '债主已死',
+        dramaticGoal: '发现债主死亡与复仇链条有关。',
+        advanceSignals: { categories: ['investigate', 'travel'], targets: ['thread_dead_creditor', 'ent_ash_debt_note'] },
+        bendSignals: { categories: ['social', 'deceive'], targets: ['ent_one_eyed_creditor'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['公布债主死讯', '投靠债使', '撕毁契书'],
+        allowedReveals: ['债主曾被同门背弃', '欠契会寻找见证人'],
+        forbiddenReveals: ['幕后复仇者身份', '旧债最终对象'],
+        nextOnAdvance: 'debt_03', nextOnBend: 'debt_03', nextOnStall: 'debt_02', nextOnShatter: 'debt_02_shattered',
+      },
+      {
+        beatId: 'debt_03', title: '还债或断债',
+        dramaticGoal: '选择清偿、转移、公开或斩断旧债因果。',
+        advanceSignals: { categories: ['negotiate', 'battle'], targets: ['thread_old_debt'] },
+        bendSignals: { categories: ['deceive', 'use_relic'], targets: ['ent_ash_debt_note'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['永不还债', '毁掉债主遗物'],
+        allowedReveals: ['旧债会牵连新的同盟'],
+        forbiddenReveals: [],
+        nextOnAdvance: null, nextOnBend: null, nextOnStall: null, nextOnShatter: null,
+      },
+    ],
+  },
+  dynasty_pursuit: {
+    id: 'dynasty_pursuit',
+    family: 'law',
+    title: '皇朝追捕',
+    publicPitch: '皇朝缉仙司封城搜捕，榜文上的画像却像极了同行者。',
+    tags: ['皇朝', '追捕', '缉仙司', '封城'],
+    weightRules: {
+      order: { '皇朝': 4, '律法': 2 },
+      storyGravity: { '战争': 2, '游历': 2 },
+      daoPath: { '游侠': 2 },
+    },
+    openingSeed: {
+      addEntities: [
+        { id: 'ent_wanted_edict', name: '缉仙榜文', kind: 'clue', affordances: ['investigate', 'observe'] },
+        { id: 'ent_imperial_arrester', name: '缉仙司校尉', kind: 'npc', affordances: ['social', 'negotiate', 'observe'] },
+      ],
+      addThreads: [
+        { threadId: 'thread_dynasty_warrant', type: 'threat', title: '皇朝缉捕', stage: 1, maxStage: 3, status: 'active', urgency: 3, visibility: 'public' },
+        { threadId: 'thread_false_portrait', type: 'mystery', title: '错像画像', stage: 1, maxStage: 3, status: 'dormant', urgency: 1, visibility: 'hidden' },
+      ],
+      addClock: { clockId: 'clock_city_lockdown', label: '封城时限', current: 0, max: 3, onFull: 'divert' },
+    },
+    beats: [
+      {
+        beatId: 'dynasty_01', title: '榜文封城',
+        dramaticGoal: '确定缉仙榜文为何与同行者相似。',
+        advanceSignals: { categories: ['investigate', 'social'], targets: ['ent_wanted_edict', 'ent_imperial_arrester'] },
+        bendSignals: { categories: ['negotiate', 'deceive'], targets: ['thread_dynasty_warrant'] },
+        stallSignals: { categories: ['rest', 'wait', 'cultivate'] },
+        shatterKeywords: ['撕毁榜文', '袭击校尉', '强闯城门'],
+        allowedReveals: ['榜文来自缉仙司', '画像并不完全准确'],
+        forbiddenReveals: ['真正被追捕者', '皇朝密令来源'],
+        nextOnAdvance: 'dynasty_02', nextOnBend: 'dynasty_02', nextOnStall: 'dynasty_01', nextOnShatter: 'dynasty_01_shattered',
+      },
+      {
+        beatId: 'dynasty_02', title: '错像疑云',
+        dramaticGoal: '追查画像错位背后的身份替换。',
+        advanceSignals: { categories: ['investigate', 'deceive'], targets: ['thread_false_portrait', 'ent_wanted_edict'] },
+        bendSignals: { categories: ['social', 'negotiate'], targets: ['ent_imperial_arrester'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['自首', '嫁祸同伴', '烧毁画像'],
+        allowedReveals: ['有人故意改过画像', '缉仙司内部也有分歧'],
+        forbiddenReveals: ['画像替换者身份', '皇朝最终目标'],
+        nextOnAdvance: 'dynasty_03', nextOnBend: 'dynasty_03', nextOnStall: 'dynasty_02', nextOnShatter: 'dynasty_02_shattered',
+      },
+      {
+        beatId: 'dynasty_03', title: '破围出城',
+        dramaticGoal: '决定洗清嫌疑、借榜脱身或正面对抗。',
+        advanceSignals: { categories: ['travel', 'negotiate'], targets: ['thread_dynasty_warrant'] },
+        bendSignals: { categories: ['battle', 'flee'], targets: ['ent_imperial_arrester'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['投敌', '屠城', '永不解释'],
+        allowedReveals: ['封城只是更大追捕的一环'],
+        forbiddenReveals: [],
+        nextOnAdvance: null, nextOnBend: null, nextOnStall: null, nextOnShatter: null,
+      },
+    ],
+  },
+  sealed_realm: {
+    id: 'sealed_realm',
+    family: 'seal',
+    title: '秘境封印',
+    publicPitch: '旧秘境的封印忽明忽暗，像在等一个错误的人开启。',
+    tags: ['秘境', '封印', '钥印', '遗迹'],
+    weightRules: {
+      storyGravity: { '夺宝': 3, '秘境': 4, '游历': 2 },
+      heavenlyLaw: { '法宝': 2, '轮回': 2 },
+      daoPath: { '阵法': 3 },
+    },
+    openingSeed: {
+      addEntities: [
+        { id: 'ent_seal_keymark', name: '残缺钥印', kind: 'prop', affordances: ['observe', 'investigate'] },
+        { id: 'ent_realm_crack', name: '秘境裂隙', kind: 'clue', affordances: ['investigate', 'observe'] },
+      ],
+      addThreads: [
+        { threadId: 'thread_sealed_realm', type: 'quest', title: '秘境封印', stage: 1, maxStage: 3, status: 'active', urgency: 2, visibility: 'public' },
+        { threadId: 'thread_wrong_opener', type: 'mystery', title: '错误开门者', stage: 1, maxStage: 3, status: 'dormant', urgency: 1, visibility: 'hidden' },
+      ],
+      addClock: { clockId: 'clock_seal_decay', label: '封印衰减', current: 0, max: 4, onFull: 'divert' },
+    },
+    beats: [
+      {
+        beatId: 'seal_01', title: '裂隙初明',
+        dramaticGoal: '确认秘境裂隙与钥印的关系。',
+        advanceSignals: { categories: ['investigate', 'observe'], targets: ['ent_realm_crack', 'ent_seal_keymark'] },
+        bendSignals: { categories: ['cultivate', 'use_relic'], targets: ['thread_sealed_realm'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['强开秘境', '砸碎钥印', '封死裂隙'],
+        allowedReveals: ['封印正在衰减', '钥印只剩一半'],
+        forbiddenReveals: ['秘境核心宝物', '错误开门者身份'],
+        nextOnAdvance: 'seal_02', nextOnBend: 'seal_02', nextOnStall: 'seal_01', nextOnShatter: 'seal_01_shattered',
+      },
+      {
+        beatId: 'seal_02', title: '门后回声',
+        dramaticGoal: '分辨秘境主动召唤的是人、血脉还是法器。',
+        advanceSignals: { categories: ['investigate', 'use_relic'], targets: ['thread_wrong_opener', 'ent_seal_keymark'] },
+        bendSignals: { categories: ['negotiate', 'social'], targets: ['thread_sealed_realm'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['献祭钥印', '独吞秘境', '转卖消息'],
+        allowedReveals: ['门后有回应', '封印会辨认气息'],
+        forbiddenReveals: ['门后存在的完整身份', '封印真正用途'],
+        nextOnAdvance: 'seal_03', nextOnBend: 'seal_03', nextOnStall: 'seal_02', nextOnShatter: 'seal_02_shattered',
+      },
+      {
+        beatId: 'seal_03', title: '开门之误',
+        dramaticGoal: '选择开启、延后、转移或重封秘境。',
+        advanceSignals: { categories: ['cultivate', 'travel'], targets: ['thread_sealed_realm'] },
+        bendSignals: { categories: ['deceive', 'negotiate'], targets: ['ent_realm_crack'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['毁掉秘境入口', '永封秘境'],
+        allowedReveals: ['开门会改变一条旧因果'],
+        forbiddenReveals: [],
+        nextOnAdvance: null, nextOnBend: null, nextOnStall: null, nextOnShatter: null,
+      },
+    ],
+  },
+  spirit_vein_race: {
+    id: 'spirit_vein_race',
+    family: 'resource',
+    title: '灵脉争夺',
+    publicPitch: '城下灵脉忽然改道，几方势力都说自己才是天命所归。',
+    tags: ['灵脉', '资源', '争夺', '城池'],
+    weightRules: {
+      storyGravity: { '经商': 2, '战争': 3, '宗门': 2 },
+      era: { '盛世': 2, '衰世': 2 },
+      daoPath: { '丹道': 1, '阵法': 2 },
+    },
+    openingSeed: {
+      addEntities: [
+        { id: 'ent_vein_survey_map', name: '灵脉测绘图', kind: 'clue', affordances: ['investigate', 'observe'] },
+        { id: 'ent_mine_broker', name: '矿脉掮客', kind: 'npc', affordances: ['social', 'negotiate', 'observe'] },
+      ],
+      addThreads: [
+        { threadId: 'thread_spirit_vein', type: 'intrigue', title: '灵脉改道', stage: 1, maxStage: 3, status: 'active', urgency: 2, visibility: 'public' },
+        { threadId: 'thread_hidden_claimant', type: 'threat', title: '暗中索脉者', stage: 1, maxStage: 3, status: 'dormant', urgency: 1, visibility: 'hidden' },
+      ],
+      addClock: { clockId: 'clock_mine_auction', label: '灵脉竞价', current: 0, max: 3, onFull: 'divert' },
+    },
+    beats: [
+      {
+        beatId: 'vein_01', title: '测绘图失真',
+        dramaticGoal: '查出灵脉测绘图为何与现状不符。',
+        advanceSignals: { categories: ['investigate', 'social'], targets: ['ent_vein_survey_map', 'ent_mine_broker'] },
+        bendSignals: { categories: ['negotiate', 'observe'], targets: ['thread_spirit_vein'] },
+        stallSignals: { categories: ['rest', 'wait', 'cultivate'] },
+        shatterKeywords: ['偷卖测绘图', '毁掉灵脉', '杀掮客'],
+        allowedReveals: ['灵脉确实改道', '有人提前知道变化'],
+        forbiddenReveals: ['暗中索脉者身份', '灵脉最终归属'],
+        nextOnAdvance: 'vein_02', nextOnBend: 'vein_02', nextOnStall: 'vein_01', nextOnShatter: 'vein_01_shattered',
+      },
+      {
+        beatId: 'vein_02', title: '众口夺脉',
+        dramaticGoal: '在多方争夺中找到可验证的真实权属。',
+        advanceSignals: { categories: ['negotiate', 'investigate'], targets: ['thread_hidden_claimant', 'ent_vein_survey_map'] },
+        bendSignals: { categories: ['social', 'deceive'], targets: ['ent_mine_broker'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['宣布独占灵脉', '卖给最高价', '引爆矿脉'],
+        allowedReveals: ['灵脉关系一座旧阵', '几方证据都不完整'],
+        forbiddenReveals: ['旧阵主人身份', '灵脉深处秘密'],
+        nextOnAdvance: 'vein_03', nextOnBend: 'vein_03', nextOnStall: 'vein_02', nextOnShatter: 'vein_02_shattered',
+      },
+      {
+        beatId: 'vein_03', title: '定脉成局',
+        dramaticGoal: '决定护脉、分脉、夺脉或弃脉。',
+        advanceSignals: { categories: ['cultivate', 'negotiate'], targets: ['thread_spirit_vein'] },
+        bendSignals: { categories: ['battle', 'travel'], targets: ['thread_hidden_claimant'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['毁掉整条灵脉', '永不插手'],
+        allowedReveals: ['灵脉会牵动地区格局'],
+        forbiddenReveals: [],
+        nextOnAdvance: null, nextOnBend: null, nextOnStall: null, nextOnShatter: null,
+      },
+    ],
+  },
+  ghost_case: {
+    id: 'ghost_case',
+    family: 'haunting',
+    title: '鬼修旧案',
+    publicPitch: '城隍旧卷忽然翻页，一个被判魂飞魄散的鬼修留下新证。',
+    tags: ['鬼修', '旧案', '城隍', '冤魂'],
+    weightRules: {
+      aberrant: { '鬼修': 4, '幽': 2 },
+      storyGravity: { '复仇': 2, '游历': 2 },
+      heavenlyLaw: { '轮回': 3 },
+    },
+    openingSeed: {
+      addEntities: [
+        { id: 'ent_ghost_case_scroll', name: '城隍旧卷', kind: 'clue', affordances: ['investigate', 'observe'] },
+        { id: 'ent_white_lantern', name: '无风白灯', kind: 'prop', affordances: ['observe', 'investigate'] },
+      ],
+      addThreads: [
+        { threadId: 'thread_ghost_case', type: 'mystery', title: '鬼修旧案', stage: 1, maxStage: 3, status: 'active', urgency: 2, visibility: 'public' },
+        { threadId: 'thread_wrong_judgement', type: 'intrigue', title: '错判之夜', stage: 1, maxStage: 3, status: 'dormant', urgency: 1, visibility: 'hidden' },
+      ],
+      addClock: { clockId: 'clock_lantern_extinguish', label: '白灯将灭', current: 0, max: 4, onFull: 'divert' },
+    },
+    beats: [
+      {
+        beatId: 'ghost_01', title: '旧卷翻页',
+        dramaticGoal: '确认旧卷为何自行翻到鬼修旧案。',
+        advanceSignals: { categories: ['investigate', 'observe'], targets: ['ent_ghost_case_scroll', 'ent_white_lantern'] },
+        bendSignals: { categories: ['social', 'cultivate'], targets: ['thread_ghost_case'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['烧掉旧卷', '熄灭白灯', '驱散冤魂'],
+        allowedReveals: ['旧案判词有涂改', '白灯只照见魂痕'],
+        forbiddenReveals: ['真正凶手身份', '鬼修为何未灭'],
+        nextOnAdvance: 'ghost_02', nextOnBend: 'ghost_02', nextOnStall: 'ghost_01', nextOnShatter: 'ghost_01_shattered',
+      },
+      {
+        beatId: 'ghost_02', title: '错判之夜',
+        dramaticGoal: '还原判案当夜被隐藏的一段证词。',
+        advanceSignals: { categories: ['investigate', 'use_relic'], targets: ['thread_wrong_judgement', 'ent_ghost_case_scroll'] },
+        bendSignals: { categories: ['negotiate', 'social'], targets: ['ent_white_lantern'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['公开召鬼', '伪造证词', '卖给鬼修'],
+        allowedReveals: ['当夜有人替换证词', '鬼修可能是替罪者'],
+        forbiddenReveals: ['替换证词的人', '城隍旧卷真正来源'],
+        nextOnAdvance: 'ghost_03', nextOnBend: 'ghost_03', nextOnStall: 'ghost_02', nextOnShatter: 'ghost_02_shattered',
+      },
+      {
+        beatId: 'ghost_03', title: '翻案或镇魂',
+        dramaticGoal: '决定翻案、镇魂、借鬼修之力或彻底放下。',
+        advanceSignals: { categories: ['social', 'negotiate'], targets: ['thread_ghost_case'] },
+        bendSignals: { categories: ['battle', 'deceive'], targets: ['thread_wrong_judgement'] },
+        stallSignals: { categories: ['rest', 'wait'] },
+        shatterKeywords: ['永镇鬼修', '毁掉全部证据'],
+        allowedReveals: ['翻案会牵动城隍体系'],
+        forbiddenReveals: [],
+        nextOnAdvance: null, nextOnBend: null, nextOnStall: null, nextOnShatter: null,
+      },
+    ],
+  },
+});
+
 /* ---------- Director 核心模块 ---------- */
 Story.Director = {};
+
+Story.Director._actionCategory = function (action) {
+  return (action && (action.intentCategory || action.category)) || 'freeform';
+};
+
+Story.Director._actionTarget = function (action) {
+  return (action && (action.targetId || (action.target && action.target.id))) || null;
+};
+
+Story.Director._actionRawText = function (action) {
+  if (!action) return '';
+  return action.rawText || (action.custom && action.custom.text) || action.publicAction || '';
+};
 
 /**
  * 计算单个 Recipe 在当前世界与角色配置下的权重。
@@ -1690,44 +2072,33 @@ Story.Director.scoreRecipe = function (state, recipe) {
  *   - 权重影响但不锁死结果。
  */
 Story.Director.generateCandidates = function (state) {
-  var recipes = [
-    Story.DirectorRecipes.relic_identity,
-    Story.DirectorRecipes.trade_contract,
-    Story.DirectorRecipes.sect_trial,
-    Story.DirectorRecipes.tower_expedition,
-  ];
+  var recipes = Object.keys(Story.DirectorRecipes).map(function (k) { return Story.DirectorRecipes[k]; });
   var rng = Story.rngFor('director', state);
   // 计算权重
   var scored = recipes.map(function (r) {
-    return { recipe: r, score: Story.Director.scoreRecipe(state, r) };
+    var score = Story.Director.scoreRecipe(state, r);
+    return { recipe: r, score: score, rankScore: score + rng.next() * 1.5 };
   });
   // 按 family 分组，取每组最高分
   var byFamily = {};
   scored.forEach(function (s) {
     var f = s.recipe.family;
-    if (!byFamily[f] || byFamily[f].score < s.score) byFamily[f] = s;
+    if (!byFamily[f] || byFamily[f].rankScore < s.rankScore) byFamily[f] = s;
   });
   var families = Object.keys(byFamily);
   // 按权重排序
-  var ranked = families.map(function (f) { return byFamily[f]; }).sort(function (a, b) { return b.score - a.score; });
-  // 确保覆盖至少两类：mystery + (intrigue|conflict|exploration)
+  var ranked = families.map(function (f) { return byFamily[f]; }).sort(function (a, b) { return b.rankScore - a.rankScore; });
   var picked = [];
-  var usedFamilies = {};
-  function addFromRanked(idx) {
-    if (picked.length >= 3) return;
-    for (var i = idx; i < ranked.length; i++) {
-      if (picked.length >= 3) break;
-      if (usedFamilies[ranked[i].recipe.family]) continue;
-      picked.push(ranked[i].recipe);
-      usedFamilies[ranked[i].recipe.family] = true;
+  var drawPool = ranked.slice();
+  while (picked.length < 3 && drawPool.length) {
+    var total = drawPool.reduce(function (sum, s) { return sum + Math.max(1, s.rankScore || s.score || 1); }, 0);
+    var roll = rng.next() * total;
+    var chosenIndex = 0;
+    for (var di = 0; di < drawPool.length; di++) {
+      roll -= Math.max(1, drawPool[di].rankScore || drawPool[di].score || 1);
+      if (roll <= 0) { chosenIndex = di; break; }
     }
-  }
-  addFromRanked(0);
-  // 如果不足 3 张（理论上 4 family 不会），补充
-  if (picked.length < 3) {
-    for (var j = 0; j < ranked.length && picked.length < 3; j++) {
-      if (picked.indexOf(ranked[j].recipe) < 0) picked.push(ranked[j].recipe);
-    }
+    picked.push(drawPool.splice(chosenIndex, 1)[0].recipe);
   }
   // 转换为候选卡结构
   var candidates = picked.slice(0, 3).map(function (r) {
@@ -1818,10 +2189,21 @@ Story.Director.activateArc = function (state, arcId) {
       wakeConditions: ['chapterIndex >= 8', 'arc ' + arcId + ' completed'],
     });
   });
-  // 按 openingSeed 创建线程
-  if (recipe.openingSeed && recipe.openingSeed.addThreads) {
+  return arc;
+};
+
+Story.Director.applyOpeningSeed = function (state, activeArc) {
+  if (!state || !activeArc) return;
+  var recipe = Story.DirectorRecipes[activeArc.recipeId];
+  if (!recipe || !recipe.openingSeed) return;
+  state.story.activeThreads = state.story.activeThreads || [];
+  var existingThreads = {};
+  state.story.activeThreads.forEach(function (t) { if (t && t.threadId) existingThreads[t.threadId] = true; });
+  if (recipe.openingSeed.addThreads) {
     recipe.openingSeed.addThreads.forEach(function (t) {
-      var thread = {
+      if (!t || !t.threadId || existingThreads[t.threadId]) return;
+      existingThreads[t.threadId] = true;
+      state.story.activeThreads.push({
         threadId: t.threadId,
         type: t.type || 'mystery',
         title: t.title || t.threadId,
@@ -1830,35 +2212,33 @@ Story.Director.activateArc = function (state, arcId) {
         urgency: t.urgency || 1,
         visibility: t.visibility || 'public',
         status: t.status || 'active',
-        sourceArcId: arcId,
+        sourceArcId: activeArc.arcId,
         ownerActorIds: [],
         involvedActorIds: [],
         summary: t.title || '',
         triggerTags: [],
         lastAdvancedChapter: 0,
         sourceChapter: state.story.chapterIndex || 0,
-      };
-      state.story.activeThreads.push(thread);
+      });
     });
   }
-  // 按 openingSeed 增加场景实体
-  if (recipe.openingSeed && recipe.openingSeed.addEntities) {
-    var scene = state.story.currentScene;
-    if (scene && scene.visibleEntities) {
-      recipe.openingSeed.addEntities.forEach(function (e) {
-        // 避免重复
-        if (!scene.visibleEntities.some(function (ve) { return ve.id === e.id; })) {
-          scene.visibleEntities.push({
-            id: e.id,
-            name: e.name,
-            kind: e.kind,
-            affordances: (e.affordances || []).slice(),
-          });
-        }
+  var scene = state.story.currentScene;
+  if (!scene) return;
+  scene.visibleEntities = Story.Scene.Entity.normalize(scene.visibleEntities);
+  var existingEntities = {};
+  scene.visibleEntities.forEach(function (e) { if (e && e.id) existingEntities[e.id] = true; });
+  if (recipe.openingSeed.addEntities) {
+    recipe.openingSeed.addEntities.forEach(function (e) {
+      if (!e || !e.id || existingEntities[e.id]) return;
+      existingEntities[e.id] = true;
+      scene.visibleEntities.push({
+        id: e.id,
+        name: e.name,
+        kind: e.kind,
+        affordances: (e.affordances || []).slice(),
       });
-    }
+    });
   }
-  return arc;
 };
 
 /* ---------- DirectorVote 投票模块 ---------- */
@@ -1882,8 +2262,8 @@ Story.Director.finalizeSessionWithArc = async function (state, arcId) {
 /** 检测是否触发了打碎（shatter）条件 */
 Story.Director._detectShatter = function (beat, action, rawText) {
   if (!beat || !beat.shatterKeywords || !beat.shatterKeywords.length) return false;
-  var text = (action && action.custom && action.custom.text) || rawText || '';
-  var cat = (action && action.intentCategory) || '';
+  var text = Story.Director._actionRawText(action) || rawText || '';
+  var cat = Story.Director._actionCategory(action);
   for (var i = 0; i < beat.shatterKeywords.length; i++) {
     if (text.indexOf(beat.shatterKeywords[i]) >= 0) return true;
   }
@@ -1908,7 +2288,14 @@ Story.Director.evaluate = function (state, envelope) {
   var actions = [];
   if (envelope.actions) {
     envelope.actions.forEach(function (a) {
-      actions.push({ actorId: a.actorId, intentCategory: a.intentCategory, targetId: a.targetId, custom: a.custom });
+      actions.push({
+        actorId: a.actorId,
+        intentCategory: a.intentCategory,
+        category: a.category,
+        targetId: a.targetId,
+        custom: a.custom,
+        rawText: a.rawText,
+      });
     });
   }
   var humanActions = actions.filter(function (a) {
@@ -1916,8 +2303,9 @@ Story.Director.evaluate = function (state, envelope) {
     return actor && actor.controller === 'human';
   });
   var primaryAction = humanActions.length > 0 ? humanActions[0] : (actions.length > 0 ? actions[0] : null);
-  var rawText = '';
-  if (primaryAction && primaryAction.custom) rawText = primaryAction.custom.text || '';
+  var rawText = Story.Director._actionRawText(primaryAction);
+  var primaryCategory = Story.Director._actionCategory(primaryAction);
+  var primaryTargetId = Story.Director._actionTarget(primaryAction);
   var result = 'stall';
   var reasons = [];
   // 1. shatter
@@ -1927,8 +2315,8 @@ Story.Director.evaluate = function (state, envelope) {
   }
   // 2. advance
   if (result === 'stall' && primaryAction && beat.advanceSignals) {
-    var catMatch = (beat.advanceSignals.categories || []).indexOf(primaryAction.intentCategory) >= 0;
-    var tgtMatch = primaryAction.targetId && (beat.advanceSignals.targets || []).indexOf(primaryAction.targetId) >= 0;
+    var catMatch = (beat.advanceSignals.categories || []).indexOf(primaryCategory) >= 0;
+    var tgtMatch = primaryTargetId && (beat.advanceSignals.targets || []).indexOf(primaryTargetId) >= 0;
     if (catMatch || tgtMatch) {
       result = 'advance';
       reasons.push('玩家行动匹配推进信号');
@@ -1936,8 +2324,8 @@ Story.Director.evaluate = function (state, envelope) {
   }
   // 3. bend
   if (result === 'stall' && primaryAction && beat.bendSignals) {
-    var bCatMatch = (beat.bendSignals.categories || []).indexOf(primaryAction.intentCategory) >= 0;
-    var bTgtMatch = primaryAction.targetId && (beat.bendSignals.targets || []).indexOf(primaryAction.targetId) >= 0;
+    var bCatMatch = (beat.bendSignals.categories || []).indexOf(primaryCategory) >= 0;
+    var bTgtMatch = primaryTargetId && (beat.bendSignals.targets || []).indexOf(primaryTargetId) >= 0;
     if (bCatMatch || bTgtMatch) {
       result = 'bend';
       reasons.push('玩家用偏转方式推进');
@@ -1945,7 +2333,7 @@ Story.Director.evaluate = function (state, envelope) {
   }
   // 4. stall
   if (result === 'stall' && primaryAction && beat.stallSignals) {
-    if ((beat.stallSignals.categories || []).indexOf(primaryAction.intentCategory) >= 0) {
+    if ((beat.stallSignals.categories || []).indexOf(primaryCategory) >= 0) {
       reasons.push('玩家未碰主线');
     }
   }
@@ -2965,11 +3353,18 @@ Story.ChoiceFactory.buildForActor = function (state, actorId, scene, envelope) {
       restPool = pool.filter(function (c) { return c !== rejoin; });
     }
   } else {
+    const arcBeat = Story.ChoiceFactory._activeDirectorBeat(state);
+    const arcChoice = Story.ChoiceFactory.buildArcChoice(state, actor, scene2, arcBeat);
+    if (arcChoice) {
+      pinned.push(arcChoice);
+      const arcFp = Story.ChoiceFactory.fingerprint(arcChoice);
+      restPool = restPool.filter(function (c) { return Story.ChoiceFactory.fingerprint(c) !== arcFp; });
+    }
     // V3.3.1：在场角色始终保证 rest 选项可用（不交由洗牌随机）
-    const restChoice = pool.find(function (c) { return c.intentCategory === 'rest'; });
+    const restChoice = restPool.find(function (c) { return c.intentCategory === 'rest'; });
     if (restChoice) {
       pinned.push(restChoice);
-      restPool = pool.filter(function (c) { return c !== restChoice; });
+      restPool = restPool.filter(function (c) { return c !== restChoice; });
     }
   }
   // 洗牌并选 3 个不同 category
@@ -3043,6 +3438,75 @@ Story.ChoiceFactory.buildForActor = function (state, actorId, scene, envelope) {
 
 Story.ChoiceFactory.fingerprint = function (choice) {
   return [choice.intentCategory, choice.approach, choice.targetType, choice.targetId, choice.primaryThreadId || ''].join(':');
+};
+
+Story.ChoiceFactory._activeDirectorBeat = function (state) {
+  var arc = state.story.director && state.story.director.activeArc;
+  if (!arc || arc.status !== 'active') return null;
+  var beat = (arc.beats || [])[arc.currentBeatIndex];
+  if (!beat || beat.status !== 'active') return null;
+  return beat;
+};
+
+Story.ChoiceFactory.buildArcChoice = function (state, actor, scene, beat) {
+  if (!state || !actor || !scene || !beat) return null;
+  var signals = beat.advanceSignals || {};
+  var categories = (signals.categories || []).slice();
+  var targets = (signals.targets || []).slice();
+  if (!categories.length && beat.bendSignals) categories = (beat.bendSignals.categories || []).slice();
+  if (!targets.length && beat.bendSignals) targets = (beat.bendSignals.targets || []).slice();
+  if (!categories.length) return null;
+  var visible = Story.Scene.Entity.normalize(scene.visibleEntities).concat(Story.Scene.Entity.normalize(scene.exits));
+  var threads = state.story.activeThreads || [];
+  var target = null;
+  var targetType = 'scene';
+  for (var i = 0; i < targets.length && !target; i++) {
+    var tid = targets[i];
+    var ent = visible.find(function (e) { return e.id === tid; });
+    if (ent) { target = ent; targetType = ent.kind || 'scene'; break; }
+    var thread = threads.find(function (t) { return t.threadId === tid; });
+    if (thread) { target = { id: thread.threadId, name: thread.title || thread.threadId, kind: 'thread' }; targetType = 'thread'; break; }
+  }
+  if (!target) {
+    for (var c = 0; c < categories.length && !target; c++) {
+      var cat = categories[c];
+      target = visible.find(function (e) { return Story.Scene.Entity.affordance(e, cat); });
+      if (target) targetType = target.kind || 'scene';
+    }
+  }
+  if (!target) return null;
+  var category = categories.find(function (cat) { return Story.Scene.Entity.affordance(target, cat); }) || categories[0];
+  var actionLabel = {
+    investigate: '调查',
+    observe: '探看',
+    social: '接触',
+    negotiate: '谈判',
+    travel: '前往',
+    battle: '迎战',
+    cultivate: '参悟',
+    use_relic: '御使',
+    deceive: '试探',
+    flee: '脱身',
+  }[category] || '推进';
+  var idx = state.story.chapterIndex + 1;
+  var targetName = target.name || target.id;
+  return {
+    id: 'ch_' + String(idx).padStart(4, '0') + '_' + actor.id + '_arc_' + beat.beatId,
+    actorId: actor.id,
+    label: actionLabel + targetName,
+    hint: '顺着当前卷纲节拍推进：' + (beat.dramaticGoal || beat.title || '主线因果'),
+    intentCategory: category,
+    approach: 'arc',
+    targetType: targetType,
+    targetId: target.id,
+    riskLevel: 2,
+    expectedBenefits: [],
+    expectedCosts: [],
+    tags: ['arc', 'director', category],
+    sourceSceneId: scene.sceneId,
+    primaryThreadId: targetType === 'thread' ? target.id : null,
+    directorRole: 'arc',
+  };
 };
 
 // V3.3.1：实体行为生成器 —— 每种实体负责生成自己的合法行为
@@ -3357,6 +3821,44 @@ Story.Narration.assembleFromAI = function (state, scene, envelope, narration) {
   };
 };
 
+Story.Narration.validateAgainstDirector = function (narration, directorGuide) {
+  if (!directorGuide || !directorGuide.forbiddenReveals || !directorGuide.forbiddenReveals.length) return null;
+  var parsed = Story.Provider.parseNarrationResponse(narration);
+  var text = String((parsed && parsed.chapter) || '');
+  for (var i = 0; i < directorGuide.forbiddenReveals.length; i++) {
+    var reveal = String(directorGuide.forbiddenReveals[i] || '').trim();
+    if (!reveal) continue;
+    if (text.indexOf(reveal) >= 0) {
+      return {
+        code: 'FORBIDDEN_REVEAL',
+        reveal: reveal,
+        message: 'AI 提前揭露了当前 Beat 禁止揭露的信息：' + reveal,
+        rawPreview: text.slice(0, 240),
+      };
+    }
+  }
+  return null;
+};
+
+Story.Narration.failPendingForDirectorViolation = function (state, violation, countRetry) {
+  if (!state || !state.story || !state.story.pendingResolution || !violation) return;
+  if (countRetry) state.story.pendingResolution.retryCount = (state.story.pendingResolution.retryCount || 0) + 1;
+  state.story.pendingResolution.lastNarrationError = {
+    code: violation.code || 'FORBIDDEN_REVEAL',
+    message: violation.message || 'AI 提前揭露了当前 Beat 禁止揭露的信息',
+    rawPreview: violation.rawPreview || '',
+  };
+  state.api.lastStatus = 'offline';
+  state.api.lastErrorCode = violation.code || 'FORBIDDEN_REVEAL';
+  state.api.lastErrorMessage = violation.message || '';
+  Story.setAIStatus('fallback', {
+    code: violation.code || 'FORBIDDEN_REVEAL',
+    message: violation.message || 'AI 提前揭露了当前 Beat 禁止揭露的信息',
+    error: violation.reveal || '',
+  });
+  Story._setTurnPhase(state, 'narration_failed');
+};
+
 Story.Narration._summary = function (state, scene, action, beats) {
   if (action) {
     const a = state.actors.find(function (x) { return x.id === action.actorId; });
@@ -3416,7 +3918,7 @@ Story.Provider.capabilities = {
   supportsChatCompletions: true,
 };
 
-Story.Provider.ERROR_CODES = ['NO_API_CONFIG','NO_API_KEY','NETWORK_ERROR','CORS_ERROR','HTTP_401','HTTP_403','HTTP_404','HTTP_429','HTTP_5XX','TIMEOUT','EMPTY_RESPONSE','INVALID_JSON','INVALID_SCHEMA','MODEL_OVERREACH'];
+Story.Provider.ERROR_CODES = ['NO_API_CONFIG','NO_API_KEY','NETWORK_ERROR','CORS_ERROR','HTTP_401','HTTP_403','HTTP_404','HTTP_429','HTTP_5XX','TIMEOUT','EMPTY_RESPONSE','INVALID_JSON','INVALID_SCHEMA','MODEL_OVERREACH','FORBIDDEN_REVEAL'];
 
 /** 调用 AI 叙事（兼容旧 ai.provider.narrate）。返回归一化后的 {title,chapter,dialogues,endingImage,_autoFixed} 或 null。 */
 Story.Provider.narrate = async function (state, brief) {
