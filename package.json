@@ -4,7 +4,9 @@
   "description": "多人互动跑团文字小说：叙事事务化、AI 必需的稳定引擎（V3.3）",
   "private": true,
   "scripts": {
-    "test": "npm run test:core && npm run test:room && npm run test:regression && npm run test:ai && npm run test:dom && npm run test:v32 && npm run test:transaction && npm run test:experience && npm run test:director",
+    "test": "npm run test:core && npm run test:room && npm run test:regression && npm run test:ai && npm run test:dom && npm run test:v32 && npm run test:transaction && npm run test:experience && npm run test:director && npm run test:server",
+    "server": "node server/index.js",
+    "test:server": "node test-server/test-server-protocol.js && node test-server/test-server-room-flow.js && node test-server/test-server-narration-failed.js && node test-server/test-server-restart-restore.js",
     "test:core": "node test-v3.js",
     "test:room": "node test-v31.js",
     "test:regression": "node test-regressions.js",
@@ -16,6 +18,7 @@
     "test:director": "node test-v332-director-candidates.js && node test-v332-director-vote.js && node test-v332-director-beats.js && node test-v332-director-transaction.js && node test-v332-director-choice.js && node test-v332-director-room.js && node test-v334-director-experience.js && node test-v335-director-observability.js"
   },
   "dependencies": {
-    "jsdom": "^25.0.1"
+    "jsdom": "^25.0.1",
+    "ws": "^8.21.0"
   }
 }

@@ -378,7 +378,59 @@ input,textarea,select{font-family:inherit;color:var(--text)}
     <button class="btn ghost sm" id="btn-quick-solo" style="display:none">快速单人（V3）</button>
   </div>
 
+  <div class="intro-cta" style="margin-top:14px">
+    <button class="btn ghost" id="btn-online-mode">联机模式（V0.1）</button>
+  </div>
+
   <div class="intro-foot">V3.3 · 叙事事务化：AI 是必需品，模型失败时本回合状态保留等待重试</div>
+</div>
+
+<!-- ============== 联机模式 ============== -->
+<div class="screen" id="screen-online">
+  <div class="lobby-title">修行局</div>
+  <div class="lobby-sub">V0.1 · 联机模式（真实多人）</div>
+  <div class="lobby-meta">
+    <span>状态 <b id="online-status">未连接</b></span>
+    <button class="btn ghost sm" id="btn-online-back">返回</button>
+  </div>
+
+  <div id="online-connect-panel" class="setup-card" style="max-width:480px;margin:18px auto">
+    <h3>连接服务器</h3>
+    <div class="modal-body">
+      <label>服务器地址（留空用当前页面）</label>
+      <input id="online-url" type="text" placeholder="ws://IP:8787/ws" style="width:100%;margin:6px 0 12px">
+      <button class="btn primary" id="btn-online-connect">连接</button>
+    </div>
+  </div>
+
+  <div id="online-lobby-panel" class="setup-card" style="display:none;max-width:480px;margin:18px auto">
+    <h3>创建 / 加入房间</h3>
+    <div class="modal-body">
+      <label>你的昵称</label>
+      <input id="online-name" type="text" value="玩家A" style="width:100%;margin:6px 0 12px">
+      <button class="btn primary" id="btn-online-create">创建房间</button>
+      <div style="height:12px"></div>
+      <label>房间码（6位数字）</label>
+      <input id="online-code" type="text" placeholder="839421" style="width:100%;margin:6px 0 12px">
+      <button class="btn ghost" id="btn-online-join">加入房间</button>
+      <div style="height:12px"></div>
+      <div class="hint" id="online-room-info"></div>
+    </div>
+  </div>
+
+  <div id="online-game-panel" class="setup-card" style="display:none;max-width:640px;margin:18px auto;text-align:left">
+    <div class="lobby-meta">
+      <span>房间码 <b id="og-roomcode">—</b></span>
+      <span>状态 <b id="og-status">—</b></span>
+      <span>回合 <b id="og-round">—</b></span>
+      <button class="btn ghost sm" id="btn-online-leave">离开</button>
+    </div>
+    <div id="og-seats" style="margin:10px 0"></div>
+    <div id="og-chapter" style="margin:10px 0;white-space:pre-wrap;line-height:1.7"></div>
+    <div id="og-choices" style="margin:10px 0"></div>
+    <div id="og-arcvote" style="margin:10px 0;display:none"></div>
+    <div class="hint" id="og-hint"></div>
+  </div>
 </div>
 
 <!-- ============== 房间大厅 ============== -->
@@ -660,6 +712,7 @@ input,textarea,select{font-family:inherit;color:var(--text)}
 
 <script src="story-core.js?v=3.3.5"></script>
 <script src="room-core.js?v=3.3.5"></script>
+<script src="public/online-client.js?v=0.1"></script>
 <script>
 /* ============================================================
  * V3 UI 控制层
@@ -2373,5 +2426,7 @@ UI.init = function () {
 
 UI.init();
 </script>
+
+<script src="public/online-ui.js?v=0.1"></script>
 </body>
 </html>

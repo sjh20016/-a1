@@ -843,6 +843,14 @@ const Room = {};
           }),
         },
         publicStory: publicStory,
+        // V0.1 联机：暴露卷纲投票信息（候选对所有席位公开；仅暴露本席位的投票）
+        directorVote: {
+          phase: room.directorVote.phase,
+          candidates: (room.directorVote.candidates || []).slice(),
+          ownVote: room.directorVote.votesBySeatId[seatId] || null,
+          votedSeatIds: Object.keys(room.directorVote.votesBySeatId || {}),
+          selectedArcId: room.directorVote.selectedArcId,
+        },
         ownSeat: {
           seatId: seat.seatId,
           kind: seat.kind,
