@@ -93,6 +93,7 @@ async function main() {
   check('请求设置足够的最大输出', captured && captured.body.max_tokens === 4096);
   check('DeepSeek 叙事请求关闭思考以降低延迟', captured && captured.body.thinking && captured.body.thinking.type === 'disabled');
   check('系统提示强制落实 chosenActions', captured && captured.body.messages[0].content.indexOf('chosenActions') >= 0);
+  check('系统提示提醒 coverageAnchors 覆盖锚点', captured && captured.body.messages[0].content.indexOf('coverageAnchors') >= 0);
   check('用户消息包含自定义行动原文', captured && captured.body.messages[1].content.indexOf('继续睡觉并追逐梦中钟声') >= 0);
   check('成功使用 API 正文而非离线模板', Story.state.story.currentChapter.title === '梦钟之后');
   check('chapter 段落数组被合并为正文', typeof Story.state.story.currentChapter.chapter === 'string' && Story.state.story.currentChapter.chapter.indexOf('掌心多出') >= 0);

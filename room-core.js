@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * 《修行局》V3.3.3 — 房间化协调器 + 卷纲导演投票入口（room-core.js）
+ * 《修行局》V3.3.5 — 房间化协调器 + 卷纲导演投票入口（room-core.js）
  * ============================================================================
  * 职责：管理房间、席位、角色绑定、回合收集、机器人自动落子、统一结算。
  *   Story 只负责叙事，Room 负责秩序与隐私。
@@ -31,7 +31,7 @@ const Room = {};
     : (typeof globalThis !== 'undefined' ? globalThis.Story : null);
   if (!Story) throw new Error('story-core.js must be loaded before room-core.js');
 
-  Room.VERSION = '3.3.3';
+  Room.VERSION = '3.3.5';
   Room.MAX_SEATS = 4;
 
   /** 机器人策略模板（影响描述与未来权重，当前决策由 Story.aiChoose 执行） */
@@ -399,6 +399,10 @@ const Room = {};
         room.status = 'collecting';
       }
       _logEvent(room, { type: 'ARC_VOTE_FINALIZED', visibility: 'public', payload: { selectedArcId: winner } });
+      var activatedPayload = _directorEventPayload(room);
+      if (activatedPayload) {
+        _logEvent(room, { type: 'DIRECTOR_ARC_ACTIVATED', visibility: 'public', payload: activatedPayload });
+      }
       return room;
     },
     submitAction: function (roomId, seatId, action) {
@@ -612,6 +616,28 @@ const Room = {};
     room.updatedAt = Date.now();
   }
 
+  function _directorEventPayload(room) {
+    if (!room || !room.storySession || !Story.getDirectorSnapshot) return null;
+    var snap = Story.getDirectorSnapshot(room.storySession);
+    if (!snap || !snap.activeArc) return null;
+    var arc = snap.activeArc;
+    var last = snap.lastDivergence || null;
+    var event = snap.lastEvent || null;
+    return {
+      arcId: arc.arcId,
+      arcTitle: arc.title,
+      arcStatus: arc.status,
+      currentBeatId: arc.currentBeat ? arc.currentBeat.beatId : '',
+      currentBeatTitle: arc.currentBeat ? arc.currentBeat.title : '',
+      result: event ? event.result : (last ? last.result : null),
+      lastBeatId: event ? event.beatId : (last ? last.beatId : null),
+      reasons: last ? (last.reasons || []) : [],
+      clockEvents: last ? (last.clockEvents || []) : [],
+      directorScore: last && last.directorScore ? last.directorScore : null,
+      clocks: arc.pressureClocks || [],
+    };
+  }
+
   /** 开启新回合：重置收集状态，机器人自动落子 */
   function _openTurn(room) {
     if (!room.storySession) return;
@@ -696,6 +722,12 @@ const Room = {};
         room.turn.phase = 'published';
         room.turn.resolutionId = 'res_' + room.turn.round;
         _logEvent(room, { type: 'CHAPTER_PUBLISHED', visibility: 'public', payload: { round: room.turn.round, chapterIndex: room.storySession.story.chapterIndex } });
+        var directorPayload = _directorEventPayload(room);
+        if (directorPayload && directorPayload.result) {
+          directorPayload.round = room.turn.round;
+          directorPayload.chapterIndex = room.storySession.story.chapterIndex;
+          _logEvent(room, { type: 'DIRECTOR_RESOLVED', visibility: 'public', payload: directorPayload });
+        }
         _logEvent(room, { type: 'PRIVATE_CHOICES_DELIVERED', visibility: 'seat', payload: { round: room.turn.round } });
         room.status = 'collecting';
         _openTurn(room);
@@ -737,6 +769,12 @@ const Room = {};
         room.turn.phase = 'published';
         room.turn.resolutionId = 'res_' + room.turn.round;
         _logEvent(room, { type: 'CHAPTER_PUBLISHED', visibility: 'public', payload: { round: room.turn.round, chapterIndex: room.storySession.story.chapterIndex } });
+        var directorPayload = _directorEventPayload(room);
+        if (directorPayload && directorPayload.result) {
+          directorPayload.round = room.turn.round;
+          directorPayload.chapterIndex = room.storySession.story.chapterIndex;
+          _logEvent(room, { type: 'DIRECTOR_RESOLVED', visibility: 'public', payload: directorPayload });
+        }
         _logEvent(room, { type: 'PRIVATE_CHOICES_DELIVERED', visibility: 'seat', payload: { round: room.turn.round } });
         room.status = 'collecting';
         _openTurn(room);

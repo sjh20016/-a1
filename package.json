@@ -1,6 +1,6 @@
 {
   "name": "xiuxianju-v3",
-  "version": "3.3.3",
+  "version": "3.3.5",
   "description": "多人互动跑团文字小说：叙事事务化、AI 必需的稳定引擎（V3.3）",
   "private": true,
   "scripts": {
@@ -13,7 +13,7 @@
     "test:v32": "node test-v32-intent.js && node test-v32-resolver.js && node test-v32-choice.js && node test-v32-provider.js",
     "test:transaction": "node test-v33-transaction.js",
     "test:experience": "node test-v33-experience.js",
-    "test:director": "node test-v332-director-candidates.js && node test-v332-director-vote.js && node test-v332-director-beats.js && node test-v332-director-transaction.js && node test-v332-director-choice.js && node test-v332-director-room.js"
+    "test:director": "node test-v332-director-candidates.js && node test-v332-director-vote.js && node test-v332-director-beats.js && node test-v332-director-transaction.js && node test-v332-director-choice.js && node test-v332-director-room.js && node test-v334-director-experience.js && node test-v335-director-observability.js"
   },
   "dependencies": {
     "jsdom": "^25.0.1"

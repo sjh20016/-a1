@@ -1,8 +1,8 @@
 /**
  * ============================================================================
- * 《修行局》V3.3.3 —— 叙事事务化 + 共享场景 + 场景实体 + 卷纲导演真实接入
+ * 《修行局》V3.3.5 —— 叙事事务化 + 共享场景 + 场景实体 + 卷纲导演可观测
  * ============================================================================
- * 核心原则（V3.3.3）：
+ * 核心原则（V3.3.5）：
  *   先结算，后写文。先写账本，后写小说。
  *   玩家行动 → IntentParser 识别意图 → TurnResolver 本地确定结果/代价/时间/
  *   关系/世界变化 → StateDelta 写入账本与场景 → ChoiceFactory 本地生成下一轮选项
@@ -74,7 +74,7 @@ Story.createRng = function (seed, sub) {
  * §1 常量：七枚开界骰 / 地貌 / 天道 / 人格 / AI 同伴模板
  * ============================================================ */
 
-Story.VERSION = '3.3.3';
+Story.VERSION = '3.3.5';
 
 /** V3.3 回合状态机阶段（Narration Transaction） */
 Story.TURN_PHASES = ['collecting', 'locked', 'resolving', 'awaiting_narration', 'narration_failed', 'published'];
@@ -650,6 +650,7 @@ Story._generateOpening = async function (state) {
   state.story.currentScene = Story.Scene.createOpeningScene(state);
   state.story.activeThreads = Story.Scene.createOpeningThreads(state);
   if (state.story.director && state.story.director.activeArc) {
+    Story.Director.applyArcOpeningScenePatch(state, state.story.director.activeArc);
     Story.Director.applyOpeningSeed(state, state.story.director.activeArc);
   }
 
@@ -695,6 +696,11 @@ Story._generateOpening = async function (state) {
   const directorViolation = Story.Narration.validateAgainstDirector(narration, brief.director);
   if (directorViolation) {
     Story.Narration.failPendingForDirectorViolation(state, directorViolation, false);
+    return;
+  }
+  const coverageViolation = Story.Narration.validateCoverage(narration, brief);
+  if (coverageViolation) {
+    Story.Narration.failPendingForDirectorViolation(state, coverageViolation, false);
     return;
   }
 
@@ -827,6 +833,11 @@ Story.retryNarration = async function (storyState, options) {
     Story.Narration.failPendingForDirectorViolation(state, directorViolation, true);
     return null;
   }
+  const coverageViolation = Story.Narration.validateCoverage(narration, brief);
+  if (coverageViolation) {
+    Story.Narration.failPendingForDirectorViolation(state, coverageViolation, true);
+    return null;
+  }
 
   // 成功：提交
   return Story._commitPendingResolution(state, narration, isOpening);
@@ -952,6 +963,11 @@ Story.resolveTurn = async function (storyState, actionsByActorId) {
   const directorViolation = Story.Narration.validateAgainstDirector(narration, brief.director);
   if (directorViolation) {
     Story.Narration.failPendingForDirectorViolation(state, directorViolation, false);
+    return state;
+  }
+  const coverageViolation = Story.Narration.validateCoverage(narration, brief);
+  if (coverageViolation) {
+    Story.Narration.failPendingForDirectorViolation(state, coverageViolation, false);
     return state;
   }
 
@@ -2008,6 +2024,140 @@ Object.assign(Story.DirectorRecipes, {
   },
 });
 
+Story.DirectorOpeningScenePatches = {
+  relic_identity: {
+    locationId: 'inn_redsand', locationName: '赤砂边城·听雨客栈',
+    immediateConflict: '一柄残剑在雨夜认错主人，剑中残响像在呼唤旧名。',
+    immediateQuestion: '是否追查残剑为何认主？',
+    deadline: { type: '追剑者逼近', remaining: 4, unit: '刻' },
+    replaceDefaultEntities: true, replaceDefaultThreads: true,
+    baseEntities: [
+      { id: 'ent_innkeeper', name: '女掌柜', kind: 'npc', affordances: ['social', 'negotiate', 'observe'] },
+    ],
+    baseExits: [
+      { id: 'exit_gate', name: '城门', kind: 'exit', affordances: ['travel', 'flee'] },
+      { id: 'exit_backyard', name: '客栈后院', kind: 'exit', affordances: ['travel', 'observe'] },
+    ],
+  },
+  trade_contract: {
+    locationId: 'inn_redsand', locationName: '赤砂边城·听雨客栈',
+    immediateConflict: '商会使者将连夜离城，半封密信与残账指向一纸血契。',
+    immediateQuestion: '是否追查被截断的密信？',
+    deadline: { type: '商队离城', remaining: 3, unit: '刻' },
+    replaceDefaultEntities: true, replaceDefaultThreads: true,
+    baseEntities: [
+      { id: 'ent_innkeeper', name: '女掌柜', kind: 'npc', affordances: ['social', 'negotiate', 'observe'] },
+      { id: 'ent_trade_caravan', name: '待发商队车队', kind: 'npc', affordances: ['social', 'negotiate', 'travel', 'observe'] },
+    ],
+    baseExits: [
+      { id: 'exit_gate', name: '城门', kind: 'exit', affordances: ['travel', 'flee'] },
+      { id: 'exit_guild', name: '商会旧址', kind: 'exit', affordances: ['travel', 'investigate'] },
+    ],
+  },
+  sect_trial: {
+    locationId: 'sect_trial_gate', locationName: '青霄别院·试炼门',
+    immediateConflict: '宗门执事封住山门，试炼令牌只在今夜发放。',
+    immediateQuestion: '是否接下三重试炼？',
+    deadline: { type: '试炼截止', remaining: 4, unit: '刻' },
+    replaceDefaultEntities: true, replaceDefaultThreads: true,
+    baseEntities: [],
+    baseExits: [
+      { id: 'exit_trial_path', name: '试炼山道', kind: 'exit', affordances: ['travel', 'investigate'] },
+      { id: 'exit_outer_court', name: '外院广场', kind: 'exit', affordances: ['travel', 'observe'] },
+    ],
+  },
+  tower_expedition: {
+    locationId: 'tower_shadow_station', locationName: '塔影驿站',
+    immediateConflict: '倒悬古塔的影子落在驿站屋脊，塔钥地图只剩半幅。',
+    immediateQuestion: '是否趁塔门未合前寻找入口？',
+    deadline: { type: '古塔入口闭合', remaining: 5, unit: '刻' },
+    replaceDefaultEntities: true, replaceDefaultThreads: true,
+    baseEntities: [],
+    baseExits: [
+      { id: 'exit_tower_ruins', name: '古塔废墟', kind: 'exit', affordances: ['travel', 'investigate'] },
+      { id: 'exit_dune_road', name: '沙丘旧路', kind: 'exit', affordances: ['travel', 'flee'] },
+    ],
+  },
+  demon_accord: {
+    locationId: 'border_oath_camp', locationName: '边荒盟帐',
+    immediateConflict: '妖庭使者带着半枚骨盟入帐，血誓纹路尚未冷却。',
+    immediateQuestion: '是否与妖庭使者谈判？',
+    deadline: { type: '妖使耐心', remaining: 3, unit: '刻' },
+    replaceDefaultEntities: true, replaceDefaultThreads: true,
+    baseEntities: [],
+    baseExits: [
+      { id: 'exit_border_wilds', name: '边荒妖径', kind: 'exit', affordances: ['travel', 'flee'] },
+      { id: 'exit_human_pass', name: '人族关隘', kind: 'exit', affordances: ['travel', 'negotiate'] },
+    ],
+  },
+  old_debt_revenge: {
+    locationId: 'ash_debt_hall', locationName: '灰契旧堂',
+    immediateConflict: '灰烬欠契自行显字，独眼债使说债主已死却债未清。',
+    immediateQuestion: '是否查清旧债源头？',
+    deadline: { type: '债使逼近', remaining: 4, unit: '刻' },
+    replaceDefaultEntities: true, replaceDefaultThreads: true,
+    baseEntities: [],
+    baseExits: [
+      { id: 'exit_debt_alley', name: '债巷', kind: 'exit', affordances: ['travel', 'investigate'] },
+      { id: 'exit_burnt_archive', name: '焚毁档库', kind: 'exit', affordances: ['travel', 'observe'] },
+    ],
+  },
+  dynasty_pursuit: {
+    locationId: 'sealed_city_gate', locationName: '赤砂城门·封榜处',
+    immediateConflict: '缉仙司校尉张贴榜文，城门铁索正一寸寸落下。',
+    immediateQuestion: '是否在封城前洗清嫌疑或脱身？',
+    deadline: { type: '封城时限', remaining: 3, unit: '刻' },
+    replaceDefaultEntities: true, replaceDefaultThreads: true,
+    baseEntities: [],
+    baseExits: [
+      { id: 'exit_locked_gate', name: '将闭城门', kind: 'exit', affordances: ['travel', 'flee'] },
+      { id: 'exit_yamen_lane', name: '缉仙司巷口', kind: 'exit', affordances: ['travel', 'observe'] },
+    ],
+  },
+  sealed_realm: {
+    locationId: 'realm_crack_shrine', locationName: '旧祠秘境裂隙',
+    immediateConflict: '残缺钥印在旧祠中发烫，秘境裂隙像一扇正在变薄的门。',
+    immediateQuestion: '是否探查秘境封印为何松动？',
+    deadline: { type: '封印衰减', remaining: 4, unit: '刻' },
+    replaceDefaultEntities: true, replaceDefaultThreads: true,
+    baseEntities: [],
+    baseExits: [
+      { id: 'exit_realm_threshold', name: '秘境门槛', kind: 'exit', affordances: ['travel', 'investigate'] },
+      { id: 'exit_old_shrine', name: '旧祠外林', kind: 'exit', affordances: ['travel', 'flee'] },
+    ],
+  },
+  spirit_vein_race: {
+    locationId: 'vein_survey_yard', locationName: '灵脉测绘场',
+    immediateConflict: '灵脉测绘图与地脉流向相反，矿脉掮客正等各方出价。',
+    immediateQuestion: '是否查出灵脉为何改道？',
+    deadline: { type: '灵脉竞价', remaining: 3, unit: '刻' },
+    replaceDefaultEntities: true, replaceDefaultThreads: true,
+    baseEntities: [],
+    baseExits: [
+      { id: 'exit_vein_mouth', name: '灵脉入口', kind: 'exit', affordances: ['travel', 'investigate'] },
+      { id: 'exit_market_yard', name: '竞价场', kind: 'exit', affordances: ['travel', 'negotiate'] },
+    ],
+  },
+  ghost_case: {
+    locationId: 'city_god_archive', locationName: '城隍旧卷阁',
+    immediateConflict: '城隍旧卷无风自翻，无风白灯照出一行未干的魂字。',
+    immediateQuestion: '是否重查鬼修旧案？',
+    deadline: { type: '白灯将灭', remaining: 4, unit: '刻' },
+    replaceDefaultEntities: true, replaceDefaultThreads: true,
+    baseEntities: [],
+    baseExits: [
+      { id: 'exit_archive_depth', name: '旧卷深处', kind: 'exit', affordances: ['travel', 'investigate'] },
+      { id: 'exit_temple_court', name: '城隍院落', kind: 'exit', affordances: ['travel', 'observe'] },
+    ],
+  },
+};
+
+Object.keys(Story.DirectorOpeningScenePatches).forEach(function (id) {
+  if (Story.DirectorRecipes[id]) {
+    Story.DirectorRecipes[id].openingScenePatch = Story.DirectorOpeningScenePatches[id];
+  }
+});
+
 /* ---------- Director 核心模块 ---------- */
 Story.Director = {};
 
@@ -2239,6 +2389,44 @@ Story.Director.applyOpeningSeed = function (state, activeArc) {
       });
     });
   }
+  scene.activeThreadIds = (state.story.activeThreads || [])
+    .filter(function (t) { return t && (t.status === 'active' || t.status === 'dormant'); })
+    .map(function (t) { return t.threadId; });
+  Story.Scene._syncActorsToScene(state, scene);
+};
+
+Story.Director.applyArcOpeningScenePatch = function (state, activeArc) {
+  if (!state || !activeArc || !state.story) return;
+  var recipe = Story.DirectorRecipes[activeArc.recipeId];
+  var patch = recipe && recipe.openingScenePatch;
+  var scene = state.story.currentScene;
+  if (!patch || !scene) return;
+  if (patch.locationId) scene.locationId = patch.locationId;
+  if (patch.locationName) scene.locationName = patch.locationName;
+  if (patch.timeOfDay) scene.timeOfDay = patch.timeOfDay;
+  if (patch.weather) scene.weather = patch.weather;
+  if (patch.immediateConflict) scene.immediateConflict = patch.immediateConflict;
+  if (patch.immediateQuestion) scene.immediateQuestion = patch.immediateQuestion;
+  if (patch.deadline !== undefined) scene.deadline = patch.deadline ? Story._clone(patch.deadline) : null;
+  if (patch.pressure != null) scene.pressure = patch.pressure;
+  if (patch.replaceDefaultEntities) {
+    scene.visibleEntities = Story.Scene.Entity.normalize(patch.baseEntities || []);
+    scene.availableAssets = [];
+  } else if (patch.baseEntities && patch.baseEntities.length) {
+    var current = Story.Scene.Entity.normalize(scene.visibleEntities);
+    var byId = {};
+    current.forEach(function (e) { byId[e.id] = true; });
+    patch.baseEntities.forEach(function (e) {
+      if (e && e.id && !byId[e.id]) current.push(Story._clone(e));
+    });
+    scene.visibleEntities = Story.Scene.Entity.normalize(current);
+  }
+  if (patch.baseExits) scene.exits = Story.Scene.Entity.normalize(patch.baseExits);
+  if (patch.replaceDefaultThreads) state.story.activeThreads = [];
+  scene.activeThreadIds = [];
+  scene.recentEvents = scene.recentEvents || [];
+  scene.recentEvents.push('卷纲开局：' + activeArc.title);
+  Story.Scene._syncActorsToScene(state, scene);
 };
 
 /* ---------- DirectorVote 投票模块 ---------- */
@@ -2298,43 +2486,67 @@ Story.Director.evaluate = function (state, envelope) {
       });
     });
   }
-  var humanActions = actions.filter(function (a) {
-    var actor = state.actors.find(function (ac) { return ac.id === a.actorId; });
-    return actor && actor.controller === 'human';
-  });
-  var primaryAction = humanActions.length > 0 ? humanActions[0] : (actions.length > 0 ? actions[0] : null);
-  var rawText = Story.Director._actionRawText(primaryAction);
-  var primaryCategory = Story.Director._actionCategory(primaryAction);
-  var primaryTargetId = Story.Director._actionTarget(primaryAction);
-  var result = 'stall';
+  var directorScore = { advance: 0, bend: 0, stall: 0, shatter: 0, conflicts: [] };
+  var humanDirections = {};
   var reasons = [];
-  // 1. shatter
-  if (Story.Director._detectShatter(beat, primaryAction, rawText)) {
+  actions.forEach(function (action) {
+    var actor = state.actors.find(function (ac) { return ac.id === action.actorId; });
+    var isHuman = actor && actor.controller === 'human';
+    var actorName = actor ? actor.name : action.actorId;
+    var cat = Story.Director._actionCategory(action);
+    var targetId = Story.Director._actionTarget(action);
+    var direction = null;
+    var shatter = Story.Director._detectShatter(beat, action, Story.Director._actionRawText(action));
+    if (shatter) {
+      directorScore.shatter += 4;
+      direction = 'shatter';
+      reasons.push(actorName + '触发打碎信号');
+    } else if (beat.advanceSignals &&
+      ((beat.advanceSignals.categories || []).indexOf(cat) >= 0 ||
+       (targetId && (beat.advanceSignals.targets || []).indexOf(targetId) >= 0))) {
+      directorScore.advance += isHuman ? 2 : 1;
+      direction = 'advance';
+      reasons.push(actorName + '匹配推进信号');
+    } else if (beat.bendSignals &&
+      ((beat.bendSignals.categories || []).indexOf(cat) >= 0 ||
+       (targetId && (beat.bendSignals.targets || []).indexOf(targetId) >= 0))) {
+      directorScore.bend += isHuman ? 2 : 1;
+      direction = 'bend';
+      reasons.push(actorName + '匹配偏转信号');
+    } else if (beat.stallSignals && (beat.stallSignals.categories || []).indexOf(cat) >= 0) {
+      directorScore.stall += isHuman ? 1 : 0.5;
+      direction = 'stall';
+      reasons.push(actorName + '未触碰主线压力');
+    } else {
+      directorScore.stall += isHuman ? 1 : 0;
+      direction = 'stall';
+    }
+    if (isHuman && direction) humanDirections[direction] = (humanDirections[direction] || 0) + 1;
+  });
+  var result = 'stall';
+  var humanDirectionCount = Object.keys(humanDirections).filter(function (k) { return humanDirections[k] > 0; }).length;
+  if (humanDirectionCount > 1) {
+    directorScore.conflicts.push({
+      type: 'playerConflict',
+      directions: Story._clone(humanDirections),
+    });
+    reasons.push('多人行动方向冲突');
+  }
+  // 1. shatter 优先
+  if (directorScore.shatter >= 4) {
     result = 'shatter';
-    reasons.push('玩家触发了打碎关键词');
-  }
-  // 2. advance
-  if (result === 'stall' && primaryAction && beat.advanceSignals) {
-    var catMatch = (beat.advanceSignals.categories || []).indexOf(primaryCategory) >= 0;
-    var tgtMatch = primaryTargetId && (beat.advanceSignals.targets || []).indexOf(primaryTargetId) >= 0;
-    if (catMatch || tgtMatch) {
-      result = 'advance';
-      reasons.push('玩家行动匹配推进信号');
-    }
-  }
-  // 3. bend
-  if (result === 'stall' && primaryAction && beat.bendSignals) {
-    var bCatMatch = (beat.bendSignals.categories || []).indexOf(primaryCategory) >= 0;
-    var bTgtMatch = primaryTargetId && (beat.bendSignals.targets || []).indexOf(primaryTargetId) >= 0;
-    if (bCatMatch || bTgtMatch) {
+  } else {
+    var closeAdvanceBend = directorScore.advance > 0 && directorScore.bend > 0 &&
+      Math.abs(directorScore.advance - directorScore.bend) <= 1;
+    if (closeAdvanceBend || (humanDirectionCount > 1 && (humanDirections.advance || humanDirections.bend))) {
       result = 'bend';
-      reasons.push('玩家用偏转方式推进');
-    }
-  }
-  // 4. stall
-  if (result === 'stall' && primaryAction && beat.stallSignals) {
-    if ((beat.stallSignals.categories || []).indexOf(primaryCategory) >= 0) {
-      reasons.push('玩家未碰主线');
+    } else if (directorScore.advance >= directorScore.bend && directorScore.advance > directorScore.stall && directorScore.advance > 0) {
+      result = 'advance';
+    } else if (directorScore.bend > 0 && directorScore.bend >= directorScore.stall) {
+      result = 'bend';
+    } else {
+      result = 'stall';
+      if (!reasons.length) reasons.push('本回合没有有效推进卷纲');
     }
   }
   // 时钟
@@ -2364,12 +2576,14 @@ Story.Director.evaluate = function (state, envelope) {
     result: result,
     allowedReveals: beat.allowedReveals || [],
     forbiddenReveals: beat.forbiddenReveals || [],
+    directorScore: Story._clone(directorScore),
   };
   return {
     arcId: arc.arcId,
     beatId: beat.beatId,
     result: result,
     reasons: reasons,
+    directorScore: directorScore,
     clockDeltas: clockDeltas,
     arcDeltas: arcDeltas,
     sceneDeltas: [],
@@ -2381,14 +2595,80 @@ Story.Director.evaluate = function (state, envelope) {
 /**
  * 应用 DirectorPlan 到状态（仅在 _commitPendingResolution 中调用）。
  */
+Story.Director.resolveClockFull = function (state, arc, clock) {
+  if (!state || !arc || !clock) return null;
+  var scene = state.story.currentScene;
+  var pressureText = (clock.label || clock.clockId) + '已满，局势不再等待玩家。';
+  if (scene) {
+    scene.pressure = Math.max(scene.pressure || 0, 3);
+    scene.sceneStatus = 'pressured';
+    scene.recentEvents = scene.recentEvents || [];
+    scene.recentEvents.push(pressureText);
+    if (scene.deadline && (scene.deadline.type === clock.label || String(scene.deadline.type || '').indexOf(clock.label) >= 0)) {
+      scene.deadline.remaining = 0;
+    }
+    if (clock.clockId === 'clock_caravan_departure') {
+      scene.visibleEntities = Story.Scene.Entity.normalize(scene.visibleEntities).filter(function (e) { return e.id !== 'ent_trade_caravan'; });
+      scene.exits = Story.Scene.Entity.normalize(scene.exits);
+      if (!scene.exits.some(function (e) { return e.id === 'exit_caravan_trail'; })) {
+        scene.exits.push({ id: 'exit_caravan_trail', name: '商队车辙', kind: 'exit', affordances: ['travel', 'investigate'] });
+      }
+      pressureText = '商队已经离城，只剩车辙与被雨水冲淡的灵砂。';
+      scene.recentEvents.push(pressureText);
+    } else if (clock.clockId === 'clock_city_lockdown') {
+      scene.exits = Story.Scene.Entity.normalize(scene.exits).map(function (e) {
+        if (e.id === 'exit_locked_gate') e.state = 'locked';
+        return e;
+      });
+      pressureText = '城门已经落锁，缉仙司的搜捕转入明面。';
+      scene.recentEvents.push(pressureText);
+    } else if (clock.clockId === 'clock_seal_decay') {
+      pressureText = '封印衰减到危险边缘，秘境裂隙开始主动吞吐灵光。';
+      scene.recentEvents.push(pressureText);
+    }
+  }
+  var currentBeat = (arc.beats || [])[arc.currentBeatIndex];
+  var divertedId = currentBeat ? (currentBeat.beatId + '_diverted_' + clock.clockId) : ('diverted_' + clock.clockId);
+  if (currentBeat && !arc.beats.some(function (b) { return b.beatId === divertedId; })) {
+    currentBeat.status = 'diverted';
+    arc.beats.push({
+      beatId: divertedId,
+      title: '时限已至',
+      dramaticGoal: pressureText,
+      status: 'active',
+      advanceSignals: { categories: ['investigate', 'travel', 'social'], targets: [] },
+      bendSignals: { categories: ['negotiate', 'deceive', 'use_relic'], targets: [] },
+      stallSignals: { categories: ['rest', 'wait', 'cultivate'] },
+      shatterKeywords: [],
+      allowedReveals: [pressureText],
+      forbiddenReveals: [],
+      nextOnAdvance: null, nextOnBend: null, nextOnStall: null, nextOnShatter: null,
+    });
+    arc.currentBeatIndex = arc.beats.length - 1;
+  }
+  return {
+    op: 'DIVERT_BEAT',
+    clockId: clock.clockId,
+    narrativePressure: pressureText,
+  };
+};
+
 Story.Director.applyPlan = function (state, plan) {
   if (!plan) return;
   var d = state.story.director;
   var arc = d.activeArc;
   if (!arc || arc.arcId !== plan.arcId) return;
+  var clockEvents = [];
   (plan.clockDeltas || []).forEach(function (cd) {
     var clock = (arc.pressureClocks || []).find(function (c) { return c.clockId === cd.clockId; });
-    if (clock) clock.current = Math.min(clock.max, (clock.current || 0) + (cd.delta || 0));
+    if (clock) {
+      var before = clock.current || 0;
+      clock.current = Math.min(clock.max, before + (cd.delta || 0));
+      if (before < clock.max && clock.current >= clock.max) {
+        var clockEvent = Story.Director.resolveClockFull(state, arc, clock);
+        if (clockEvent) clockEvents.push(clockEvent);
+      }
+    }
   });
   (plan.arcDeltas || []).forEach(function (ad) {
     if (ad.op === 'ADVANCE_BEAT') {
@@ -2423,7 +2703,9 @@ Story.Director.applyPlan = function (state, plan) {
   arc.divergenceLog = arc.divergenceLog || [];
   arc.divergenceLog.push({
     chapterIndex: state.story.chapterIndex, beatId: plan.beatId,
-    result: plan.result, reasons: plan.reasons || [], timestamp: Date.now(),
+    result: plan.result, reasons: plan.reasons || [], clockEvents: clockEvents,
+    directorScore: plan.directorScore ? Story._clone(plan.directorScore) : null,
+    timestamp: Date.now(),
   });
   arc.revealLog = arc.revealLog || [];
   if (plan.narrativeGuide && plan.narrativeGuide.allowedReveals) {
@@ -2801,6 +3083,9 @@ Story.Resolver.resolveTurn = function (state, intents) {
 
 Story.Resolver.buildOpeningEnvelope = function (state) {
   const scene = state.story.currentScene;
+  const sceneThreads = (state.story.activeThreads || []).filter(function (t) {
+    return !scene || !scene.activeThreadIds || scene.activeThreadIds.indexOf(t.threadId) >= 0;
+  }).slice(0, 2);
   return {
     turnId: 'turn_0000',
     chapterIndex: 0,
@@ -2811,16 +3096,80 @@ Story.Resolver.buildOpeningEnvelope = function (state) {
     interactions: [],
     publicDelta: [
       { op: 'ADD_PUBLIC_FACT', payload: { text: state.world.worldBible.rules[0] }, source: 'resolver', sourceTurnId: 'turn_0000' },
-      { op: 'ADD_PUBLIC_RUMOR', payload: { text: '赤砂边城近来异象频生，引人注目。' }, source: 'resolver', sourceTurnId: 'turn_0000' },
+      { op: 'ADD_PUBLIC_RUMOR', payload: { text: (scene ? scene.locationName : '此地') + '近来异象频生，引人注目。' }, source: 'resolver', sourceTurnId: 'turn_0000' },
     ],
     privateDelta: state.actors.slice(1).map(function (a) {
       return { op: 'ADD_PRIVATE_FACT', target: { actorId: a.id }, payload: { text: a.name + '心中暗忖：' + a.hiddenFate }, source: 'resolver', sourceTurnId: 'turn_0000' };
     }),
     sceneDelta: {}, worldDelta: {}, narrationBeats: [
-      state.actors[0].name + '与三人于听雨客栈相遇。',
-      '商会使者将连夜离城，半封密信下落不明。',
-      '此界天道为「' + state.world.worldBible.heavenlyLaw + '」。',
+      state.actors[0].name + '与众人抵达' + (scene ? scene.locationName : '未知之地') + '。',
+      scene ? (scene.immediateConflict || scene.immediateQuestion || '此地旧事未尽。') : '此地旧事未尽。',
+      sceneThreads.length ? ('当前线索：' + sceneThreads.map(function (t) { return t.title; }).join('、') + '。') : ('此界天道为「' + state.world.worldBible.heavenlyLaw + '」。'),
     ], choiceConstraints: [], provenance: 'local-resolver',
+  };
+};
+
+/**
+ * 导演可观测快照：供 UI、房间事件、测试与导出层读取。
+ * 只读汇总，不暴露隐藏 dormant 细节，不修改状态。
+ */
+Story.Director.getSnapshot = function (state) {
+  state = state || Story.state;
+  var d = state && state.story && state.story.director;
+  if (!d) return null;
+  var arc = d.activeArc || null;
+  var beat = arc && (arc.beats || [])[arc.currentBeatIndex];
+  var lastDivergence = arc && arc.divergenceLog && arc.divergenceLog.length
+    ? arc.divergenceLog[arc.divergenceLog.length - 1] : null;
+  var pendingPlan = state.story.pendingResolution && state.story.pendingResolution.directorPlan
+    ? state.story.pendingResolution.directorPlan : null;
+  return {
+    phase: d.phase,
+    activeArc: arc ? {
+      arcId: arc.arcId,
+      recipeId: arc.recipeId,
+      family: arc.family,
+      title: arc.title,
+      status: arc.status,
+      tags: (arc.tags || []).slice(),
+      currentBeatIndex: arc.currentBeatIndex,
+      currentBeat: beat ? {
+        beatId: beat.beatId,
+        title: beat.title,
+        status: beat.status,
+        dramaticGoal: beat.dramaticGoal || '',
+      } : null,
+      beats: (arc.beats || []).map(function (b) {
+        return {
+          beatId: b.beatId,
+          title: b.title,
+          status: b.status,
+          dramaticGoal: b.dramaticGoal || '',
+        };
+      }),
+      pressureClocks: (arc.pressureClocks || []).map(function (c) {
+        return {
+          clockId: c.clockId,
+          label: c.label,
+          current: c.current || 0,
+          max: c.max || 1,
+          percent: Math.round(((c.current || 0) / Math.max(1, c.max || 1)) * 100),
+          isFull: (c.current || 0) >= (c.max || 1),
+          onFull: c.onFull || '',
+        };
+      }),
+    } : null,
+    dormantArcCount: (d.dormantArcs || []).length,
+    completedArcCount: (d.completedArcs || []).length,
+    lastEvent: d.lastDirectorEvent ? Story._clone(d.lastDirectorEvent) : null,
+    lastDivergence: lastDivergence ? Story._clone(lastDivergence) : null,
+    pendingPlan: pendingPlan ? {
+      arcId: pendingPlan.arcId,
+      beatId: pendingPlan.beatId,
+      result: pendingPlan.result,
+      reasons: (pendingPlan.reasons || []).slice(),
+      directorScore: pendingPlan.directorScore ? Story._clone(pendingPlan.directorScore) : null,
+    } : null,
   };
 };
 
@@ -3767,6 +4116,27 @@ Story.Narration.buildBrief = function (state, scene, envelope) {
   const forbiddenLeaks = [];
   state.actors.forEach(function (a) { if (a.hiddenFate) forbiddenLeaks.push(a.id + '_private_fate'); });
 
+  const coverageAnchors = [];
+  if (envelope && envelope.actions) {
+    const visible = Story.Scene.Entity.normalize(scene && scene.visibleEntities).concat(Story.Scene.Entity.normalize(scene && scene.exits));
+    envelope.actions.forEach(function (act) {
+      const actor = state.actors.find(function (x) { return x.id === act.actorId; });
+      const target = visible.find(function (e) { return e.id === act.targetId; }) ||
+        (state.story.activeThreads || []).find(function (t) { return t.threadId === act.targetId; });
+      coverageAnchors.push({
+        actorId: act.actorId,
+        actorName: actor ? actor.name : act.actorId,
+        controller: actor ? actor.controller : '',
+        category: act.category || act.intentCategory || '',
+        rawText: act.rawText || '',
+        targetId: act.targetId || '',
+        targetName: target ? (target.name || target.title || target.id || target.threadId) : '',
+        gains: (act.gains || []).map(function (g) { return g.text || ''; }),
+        costs: (act.costs || []).map(function (c) { return c.text || ''; }),
+      });
+    });
+  }
+
   return {
     chapterIndex: s.chapterIndex + 1,
     world: { name: w.name, year: Math.floor(w.year), toneTags: toneTags },
@@ -3778,6 +4148,7 @@ Story.Narration.buildBrief = function (state, scene, envelope) {
     },
     focalActors: focalActors,
     narrationBeats: (envelope && envelope.narrationBeats) || [],
+    coverageAnchors: coverageAnchors,
     forbiddenLeaks: forbiddenLeaks,
     // V3.3.2：Director 叙事引导——告知 AI 当前卷纲与节拍目标
     director: Story.Director.buildNarrativeGuide(state) || null,
@@ -3836,6 +4207,63 @@ Story.Narration.validateAgainstDirector = function (narration, directorGuide) {
         rawPreview: text.slice(0, 240),
       };
     }
+  }
+  return null;
+};
+
+Story.Narration._coverageTokens = function (items) {
+  var source = Array.isArray(items) ? items.join(' ') : String(items || '');
+  var stop = {
+    '行动': true, '结果': true, '可能': true, '成功': true, '失败': true,
+    '获得': true, '代价': true, '众人': true, '本回合': true, '推进': true,
+    '线索': false,
+  };
+  return (source.match(/[\u4e00-\u9fa5A-Za-z0-9]{2,}/g) || [])
+    .map(function (x) { return x.trim(); })
+    .filter(function (x, i, arr) { return x && !stop[x] && arr.indexOf(x) === i; })
+    .slice(0, 8);
+};
+
+Story.Narration.validateCoverage = function (narration, brief) {
+  if (!brief || !brief.director || !brief.director.beatResult) return null;
+  var parsed = Story.Provider.parseNarrationResponse(narration);
+  var text = String((parsed && parsed.chapter) || '');
+  var anchors = (brief.coverageAnchors || []).filter(function (a) { return a && a.controller === 'human'; });
+  if (!anchors.length) return null;
+  var missing = [];
+  anchors.forEach(function (a) {
+    var tokens = Story.Narration._coverageTokens([
+      a.actorName,
+      a.targetName,
+      a.rawText,
+      a.gains.join(' '),
+      a.costs.join(' '),
+    ]);
+    if (!tokens.length) return;
+    var hit = tokens.some(function (tok) { return text.indexOf(tok) >= 0; });
+    if (!hit) missing.push(a.actorName || a.actorId);
+  });
+  if (missing.length) {
+    return {
+      code: 'MISSING_REQUIRED_BEAT',
+      message: 'AI 正文没有覆盖本回合真人行动、目标或关键得失：' + missing.join('、'),
+      rawPreview: text.slice(0, 240),
+    };
+  }
+  var result = brief.director.beatResult;
+  var resultTokens = {
+    advance: ['推进', '发现', '查', '深入', '进展'],
+    bend: ['转', '绕', '谈', '另', '偏'],
+    stall: ['拖', '缓', '压力', '错过', '未能'],
+    shatter: ['碎', '毁', '断', '破裂', '烧'],
+  }[result] || [];
+  var hasResultTone = resultTokens.some(function (tok) { return text.indexOf(tok) >= 0; });
+  if (!hasResultTone && text.length < 180) {
+    return {
+      code: 'MISSING_REQUIRED_BEAT',
+      message: 'AI 正文过短且没有体现 Director beatResult：' + result,
+      rawPreview: text.slice(0, 240),
+    };
   }
   return null;
 };
@@ -3918,7 +4346,7 @@ Story.Provider.capabilities = {
   supportsChatCompletions: true,
 };
 
-Story.Provider.ERROR_CODES = ['NO_API_CONFIG','NO_API_KEY','NETWORK_ERROR','CORS_ERROR','HTTP_401','HTTP_403','HTTP_404','HTTP_429','HTTP_5XX','TIMEOUT','EMPTY_RESPONSE','INVALID_JSON','INVALID_SCHEMA','MODEL_OVERREACH','FORBIDDEN_REVEAL'];
+Story.Provider.ERROR_CODES = ['NO_API_CONFIG','NO_API_KEY','NETWORK_ERROR','CORS_ERROR','HTTP_401','HTTP_403','HTTP_404','HTTP_429','HTTP_5XX','TIMEOUT','EMPTY_RESPONSE','INVALID_JSON','INVALID_SCHEMA','MODEL_OVERREACH','FORBIDDEN_REVEAL','MISSING_REQUIRED_BEAT'];
 
 /** 调用 AI 叙事（兼容旧 ai.provider.narrate）。返回归一化后的 {title,chapter,dialogues,endingImage,_autoFixed} 或 null。 */
 Story.Provider.narrate = async function (state, brief) {
@@ -3997,12 +4425,18 @@ Story.Provider._briefToCtx = function (state, brief) {
   var env = brief._envelope;
   var chosenActions = (env && env.actions) ? env.actions.map(function (a) {
     var actor = state.actors.find(function (x) { return x.id === a.actorId; });
+    var scene = state.story.currentScene || {};
+    var visible = Story.Scene.Entity.normalize(scene.visibleEntities).concat(Story.Scene.Entity.normalize(scene.exits));
+    var target = visible.find(function (e) { return e.id === a.targetId; }) ||
+      (state.story.activeThreads || []).find(function (t) { return t.threadId === a.targetId; });
     return {
       actorId: a.actorId,
       actorName: actor ? actor.name : a.actorId,
       publicAction: a.rawText || Story.Narration._catLabel(a.category),
       privateIntent: a.custom ? (a.custom.text || '') : '',
       category: a.category,
+      targetId: a.targetId || '',
+      targetName: target ? (target.name || target.title || target.id || target.threadId) : '',
       outcome: a.outcome || 'success',
       outcomeLabel: Story.Narration._outcomeLabel(a.outcome),
       gains: (a.gains || []).map(function (g) { return g.text; }),
@@ -4055,9 +4489,10 @@ Story.Provider._briefToCtx = function (state, brief) {
   // 角色动态关系（而非静态 relationHints）
   var cast = state.actors.map(function (a) {
     var dynRelations = {};
-    if (a.relations) {
-      Object.keys(a.relations).forEach(function (rid) {
-        var r = a.relations[rid];
+    var relationMap = a.relationships || a.relations || {};
+    if (relationMap) {
+      Object.keys(relationMap).forEach(function (rid) {
+        var r = relationMap[rid];
         var other = state.actors.find(function (x) { return x.id === rid; });
         if (other && (r.trust || r.suspicion || r.debt || r.respect)) {
           dynRelations[other.name] = { trust: r.trust || 0, suspicion: r.suspicion || 0, debt: r.debt || 0, respect: r.respect || 0 };
@@ -4532,6 +4967,7 @@ Story.getPlayer = function () {
 Story.getActors = function () { return Story.state ? Story._clone(Story.state.actors) : []; };
 Story.getChronicle = function () { return Story.state ? Story._clone(Story.state.story.chronicle) : []; };
 Story.getActiveThreads = function () { return Story.state ? Story._clone(Story.state.story.activeThreads) : []; };
+Story.getDirectorSnapshot = function (state) { return Story.Director.getSnapshot(state || Story.state); };
 Story.getPublicFacts = function () { return Story.state ? Story.state.world.publicFacts.slice() : []; };
 Story.getPublicRumors = function () { return Story.state ? Story.state.world.publicRumors.slice() : []; };
 Story.getActiveHooks = function () { return Story.state ? Story.state.world.activeWorldHooks.slice() : []; };

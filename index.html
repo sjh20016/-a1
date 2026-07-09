@@ -652,10 +652,14 @@ input,textarea,select{font-family:inherit;color:var(--text)}
     <h4>压力</h4>
     <p id="ad-clocks">—</p>
   </div>
+  <div class="ad-section">
+    <h4>导演判定</h4>
+    <p id="ad-director-diag">—</p>
+  </div>
 </div>
 
-<script src="story-core.js?v=3.3.3"></script>
-<script src="room-core.js?v=3.3.3"></script>
+<script src="story-core.js?v=3.3.5"></script>
+<script src="room-core.js?v=3.3.5"></script>
 <script>
 /* ============================================================
  * V3 UI 控制层
@@ -821,6 +825,7 @@ UI.renderArcDrawer = function () {
   if (!state) return;
   var d = state.story.director;
   var arc = d && d.activeArc;
+  var snap = Story.getDirectorSnapshot ? Story.getDirectorSnapshot(state) : null;
   var drawer = document.getElementById('arc-drawer');
   if (!arc || arc.status === 'completed') {
     drawer.classList.remove('show');
@@ -852,6 +857,26 @@ UI.renderArcDrawer = function () {
   document.getElementById('ad-clocks').textContent = clocks.map(function (c) {
     return c.label + '：' + c.current + '/' + c.max;
   }).join(' | ');
+  var diagEl = document.getElementById('ad-director-diag');
+  if (diagEl) {
+    var last = snap && (snap.pendingPlan || snap.lastDivergence);
+    if (!last || !last.result) {
+      diagEl.textContent = '尚无本回合导演判定。';
+    } else {
+      var bits = ['结果：' + last.result];
+      if (last.reasons && last.reasons.length) bits.push('理由：' + last.reasons.join('、'));
+      if (last.clockEvents && last.clockEvents.length) {
+        bits.push('时钟后果：' + last.clockEvents.map(function (e) { return e.narrativePressure || e.clockId; }).join('、'));
+      }
+      var score = last.directorScore || null;
+      if (score && score.conflicts && score.conflicts.length) {
+        bits.push('玩家方向冲突：' + score.conflicts.map(function (c) {
+          return c.type + ' ' + Object.keys(c.directions || {}).join('/');
+        }).join('；'));
+      }
+      diagEl.textContent = bits.join('；');
+    }
+  }
 };
 
 // 卷纲抽屉切换事件
@@ -1442,6 +1467,7 @@ UI._buildNarratorPrompt = function (ctx) {
     '正文字数 450-850 中文字符，3-5 段。不得使用以下模板句：行动真正开始后最先出现的不是预想中的结果而是阻力；这条规则让简单的尝试多出一层代价；暗处有人观察；几条原本互不相干的动向在此刻交汇。',
     '只返回一个严格 JSON 对象，不要 Markdown。',
     'chosenActions 是本回合已经发生且不可忽略的角色决定。正文必须落实行动的叙事呈现；尤其是 isCustom=true 的行动，必须成为本章主要因果线。你只负责呈现这些行动的后果与场景，不得改变世界状态。',
+    'coverageAnchors 是本地校验会检查的最低覆盖锚点；每个真人行动至少要写到角色名、目标、行动原文、关键获得或代价中的一个，不得只写泛化氛围。',
     '若行动受阻，要写清阻力来自哪条世界规则，并让行动产生部分成功、代价、线索或关系变化，不能悄悄替换玩家意图。',
     '禁止无触发的高境界突破、永久死亡、飞升、顶级法宝、大势力覆灭或改写既有事实；不得向玩家视角泄露其他角色秘密。',
     '如果上下文包含 protocolCorrection，说明上一份 JSON 校验失败；必须逐条修正 previousErrors，并重新返回完整章节，不能只解释错误。',
@@ -1507,6 +1533,8 @@ UI._errorCodeReason = function (code) {
     'NETWORK_ERROR': '网络错误，无法连接接口。',
     'CORS_ERROR': '浏览器跨域拦截，无法直连该接口。',
     'MODEL_OVERREACH': '模型越权返回了状态字段，已忽略。',
+    'FORBIDDEN_REVEAL': '模型提前泄露了当前节拍禁止公开的信息。',
+    'MISSING_REQUIRED_BEAT': '模型正文没有落实本回合真人行动、目标或关键结果。',
   };
   return map[code] || '未知错误。';
 };
