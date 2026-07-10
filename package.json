@@ -16,7 +16,8 @@
     "test:experience": "node test-v33-experience.js",
     "test:director": "node test-v332-director-candidates.js && node test-v332-director-vote.js && node test-v332-director-beats.js && node test-v332-director-transaction.js && node test-v332-director-choice.js && node test-v332-director-room.js && node test-v334-director-experience.js && node test-v335-director-observability.js",
     "test:director-clean": "node test-v336-director-assets-cleanup.js && node test-v336-resolver-thread-binding.js && node test-v336-choice-thread-cleanup.js && node test-v336-opening-coverage.js && node test-v336-room-view-director.js",
-    "test:server": "node test-server/test-server-protocol.js && node test-server/test-server-room-flow.js && node test-server/test-server-narration-failed.js && node test-server/test-server-restart-restore.js"
+    "test:server": "node test-server/test-server-protocol.js && node test-server/test-server-room-flow.js && node test-server/test-server-narration-failed.js && node test-server/test-server-restart-restore.js",
+    "test:stress": "node test-server/test-server-stress.js"
   },
   "dependencies": {
     "jsdom": "^25.0.1",
