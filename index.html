@@ -310,6 +310,22 @@ input,textarea,select{font-family:inherit;color:var(--text)}
 .arc-detail .ad-beat-item.done{opacity:.6;text-decoration:line-through}
 .arc-detail .ad-beat-item.active{border-color:var(--gold);color:var(--gold)}
 .arc-detail .ad-beat-item.shattered{border-color:var(--red);color:var(--red)}
+/* V3.4.0 最小联机客户端 */
+.online-shell{width:min(980px,94vw);margin:30px auto 80px;position:relative;z-index:1}
+.online-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}
+.online-head h2{color:var(--gold);font-size:28px}
+.online-connect,.online-card{background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:14px}
+.online-connect{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.online-connect input{min-width:160px;flex:1}
+.online-meta{font-size:13px;color:var(--text-dim);line-height:1.8}
+.online-seats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:10px}
+.online-seat{border:1px solid var(--border);border-radius:7px;padding:10px;font-size:13px}
+.online-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.online-options{display:grid;gap:8px;margin-top:12px}
+.online-option{padding:11px;border:1px solid var(--border);border-radius:7px;cursor:pointer;background:rgba(255,255,255,.02)}
+.online-option.sel{border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan) inset}
+.online-chapter{white-space:pre-wrap;line-height:1.9;color:var(--text);margin-top:10px}
+.online-status{font-size:12px;color:var(--cyan)}
 </style>
 </head>
 <body>
@@ -318,7 +334,7 @@ input,textarea,select{font-family:inherit;color:var(--text)}
 <!-- ============== 开界仪式屏 ============== -->
 <div class="screen active" id="screen-intro">
   <div class="intro-title">修行局</div>
-  <div class="intro-sub">V3 · 小说式回合叙事</div>
+  <div class="intro-sub">V3.4.0 · 小说式回合叙事与真实联机</div>
   <div class="intro-core">
     一名玩家与三名 AI 修士，共同进入由<b>七枚开界骰</b>生成的修仙世界。<br>
     每一回合读一段小说，做一次选择，看见世界如何回应。<br>
@@ -330,6 +346,7 @@ input,textarea,select{font-family:inherit;color:var(--text)}
     <button class="btn ghost sm" id="btn-random-seed">随机</button>
     <button class="btn primary" id="btn-roll">掷骰开界</button>
     <button class="btn ghost sm" id="btn-continue" style="display:none">继续上一局</button>
+    <button class="btn ghost sm" id="btn-online-mode">联机模式</button>
   </div>
 
   <div class="dice-grid" id="origin-dice"></div>
@@ -378,7 +395,26 @@ input,textarea,select{font-family:inherit;color:var(--text)}
     <button class="btn ghost sm" id="btn-quick-solo" style="display:none">快速单人（V3）</button>
   </div>
 
-  <div class="intro-foot">V3.3 · 叙事事务化：AI 是必需品，模型失败时本回合状态保留等待重试</div>
+  <div class="intro-foot">V3.4.0 · 服务器权威裁决：AI 失败时行动与世界状态保持锁定，等待房主重试</div>
+</div>
+
+<!-- ============== V3.4.0 真实联机最小界面 ============== -->
+<div class="screen" id="screen-online">
+  <div class="online-shell">
+    <div class="online-head">
+      <div><h2>云端修行局</h2><div class="online-status" id="online-status">尚未连接</div></div>
+      <button class="btn ghost sm" id="btn-online-back">返回本地模式</button>
+    </div>
+    <div class="online-connect" id="online-connect">
+      <input id="online-name" placeholder="显示名" value="云游修士">
+      <input id="online-room-code" placeholder="6 位房间码" maxlength="6">
+      <button class="btn primary" id="btn-online-create">创建云端房间</button>
+      <button class="btn ghost" id="btn-online-join">加入房间</button>
+    </div>
+    <div id="online-view">
+      <div class="online-card online-meta">创建或加入房间后，服务器会成为唯一状态源。API Key、其他玩家私密选项与隐藏命数不会发送到你的浏览器。</div>
+    </div>
+  </div>
 </div>
 
 <!-- ============== 房间大厅 ============== -->
@@ -658,8 +694,9 @@ input,textarea,select{font-family:inherit;color:var(--text)}
   </div>
 </div>
 
-<script src="story-core.js?v=3.3.5"></script>
-<script src="room-core.js?v=3.3.5"></script>
+<script src="story-core.js?v=3.4.0"></script>
+<script src="room-core.js?v=3.4.0"></script>
+<script src="public/online-client.js?v=3.4.0"></script>
 <script>
 /* ============================================================
  * V3 UI 控制层
@@ -1535,6 +1572,7 @@ UI._errorCodeReason = function (code) {
     'MODEL_OVERREACH': '模型越权返回了状态字段，已忽略。',
     'FORBIDDEN_REVEAL': '模型提前泄露了当前节拍禁止公开的信息。',
     'MISSING_REQUIRED_BEAT': '模型正文没有落实本回合真人行动、目标或关键结果。',
+    'MISSING_OPENING_ANCHOR': '模型正文没有落实当前卷纲的开局地点、核心实体或冲突。',
   };
   return map[code] || '未知错误。';
 };
@@ -1703,6 +1741,115 @@ UI.testAIConnection = async function () {
 /* ============================================================
  * V3.1 房间大厅与房间回合
  * ============================================================ */
+
+/* ---------- V3.4.0 权威联机客户端 ---------- */
+UI.onlineView = null;
+UI._onlineChoiceId = null;
+UI._onlineArcId = null;
+
+UI.openOnline = function () {
+  UI.switchScreen('online');
+  document.getElementById('online-status').textContent = '正在连接服务器……';
+  OnlineClient.connect().then(function () {
+    document.getElementById('online-status').textContent = '已连接';
+    var session = OnlineClient.getSession();
+    if (session.roomId && session.seatId && session.seatToken) {
+      return OnlineClient.reconnect().catch(function () { OnlineClient.clearSession(); });
+    }
+  }).catch(function (error) {
+    document.getElementById('online-status').textContent = '连接失败：' + error.message;
+  });
+};
+
+UI._onlineSetup = function () {
+  var dao = document.getElementById('su-dao').value;
+  return {
+    name: (document.getElementById('su-name').value || '').trim() || (document.getElementById('online-name').value || '').trim() || '无名修士',
+    identity: (document.getElementById('su-identity').value || '').trim() || '散修',
+    daoPath: dao || '剑修',
+    publicWish: (document.getElementById('su-wish').value || '').trim(),
+    hiddenFate: (document.getElementById('su-fate').value || '').trim(),
+    personalityTags: Story.PERSONALITY_TAGS[dao] ? Story.PERSONALITY_TAGS[dao].slice(0, 2) : [],
+  };
+};
+
+UI._onlineCall = function (promise) {
+  return promise.catch(function (error) {
+    UI.toast((error.code ? error.code + '：' : '') + error.message);
+    return null;
+  });
+};
+
+UI.renderOnlineView = function (view) {
+  if (!view) return;
+  UI.onlineView = view;
+  var room = view.room;
+  var session = OnlineClient.getSession();
+  var isHost = session.seatId === room.hostSeatId;
+  document.getElementById('online-status').textContent = '房间 ' + (room.roomCode || '—') + ' · ' + room.status + (isHost ? ' · 房主' : '');
+  var html = '<div class="online-card"><div class="online-meta">房间码：<b>' + UI.esc(room.roomCode || '—') + '</b>　阶段：' + UI.esc(room.status) + '　回合：' + room.round + '</div>';
+  html += '<div class="online-seats">' + room.seats.map(function (seat) {
+    return '<div class="online-seat"><b>' + UI.esc(seat.displayName || '空席') + '</b><br>' + UI.esc(seat.actorName || '尚未立命') + '<br>' +
+      (seat.ready ? '✓ 已准备' : '待准备') + (seat.submitted ? ' · 已提交' : '') + '</div>';
+  }).join('') + '</div>';
+  if (room.status === 'lobby') {
+    html += '<div class="online-actions"><button class="btn primary sm" data-online="setup">使用当前立命并准备</button>';
+    if (isHost) html += '<button class="btn primary sm" data-online="start">开启卷纲投票</button>';
+    html += '</div>';
+  }
+  html += '</div>';
+
+  if (room.status === 'arc_voting' && view.arcVoting) {
+    html += '<div class="online-card"><h3>选择命途签</h3><div class="online-options">';
+    (view.arcVoting.candidates || []).forEach(function (arc) {
+      html += '<div class="online-option' + (UI._onlineArcId === arc.arcId ? ' sel' : '') + '" data-online-arc="' + UI.esc(arc.arcId) + '"><b>' + UI.esc(arc.title) + '</b><br><span class="online-meta">' + UI.esc(arc.publicPitch) + '</span></div>';
+    });
+    html += '</div><div class="online-actions"><button class="btn primary sm" data-online="vote">提交投票</button>';
+    if (isHost) html += '<button class="btn ghost sm" data-online="finalize">结算投票</button>';
+    html += '</div></div>';
+  }
+
+  if (view.publicStory && view.publicStory.chapter) {
+    html += '<div class="online-card"><h3>' + UI.esc(view.publicStory.title || '本章') + '</h3><div class="online-chapter">' + UI.esc(view.publicStory.chapter) + '</div></div>';
+  }
+
+  if (room.status === 'collecting' && view.ownActor) {
+    html += '<div class="online-card"><h3>你的行动</h3><div class="online-options">';
+    (view.ownActor.ownChoices || []).forEach(function (choice) {
+      html += '<div class="online-option' + (UI._onlineChoiceId === choice.id ? ' sel' : '') + '" data-online-choice="' + UI.esc(choice.id) + '"><b>' + UI.esc(choice.label) + '</b><br><span class="online-meta">' + UI.esc(choice.hint || '') + '</span></div>';
+    });
+    html += '</div><textarea id="online-custom-action" placeholder="或输入自定义行动（最多 500 字）"></textarea>';
+    html += '<div class="online-actions"><button class="btn primary sm" data-online="submit">提交行动</button><button class="btn ghost sm" data-online="cancel">撤回行动</button></div></div>';
+  }
+
+  if (room.status === 'narration_failed') {
+    html += '<div class="online-card"><h3>天机未应</h3><p class="online-meta">行动与本地裁决仍保持锁定，只有房主可以重试叙事。</p>';
+    if (isHost) html += '<div class="online-actions"><button class="btn primary sm" data-online="retry">重试叙事</button></div>';
+    html += '</div>';
+  }
+  document.getElementById('online-view').innerHTML = html;
+};
+
+UI.handleOnlineAction = function (action) {
+  if (action === 'setup') {
+    UI._onlineCall(OnlineClient.assignActor(UI._onlineSetup()).then(function () { return OnlineClient.setReady(true); }));
+  } else if (action === 'start') {
+    UI._onlineCall(OnlineClient.startRoomWithArcVoting());
+  } else if (action === 'vote') {
+    if (!UI._onlineArcId) { UI.toast('请先选择命途签'); return; }
+    UI._onlineCall(OnlineClient.submitArcVote(UI._onlineArcId));
+  } else if (action === 'finalize') {
+    UI._onlineCall(OnlineClient.finalizeArcVote());
+  } else if (action === 'submit') {
+    var custom = (document.getElementById('online-custom-action').value || '').trim();
+    if (!custom && !UI._onlineChoiceId) { UI.toast('请选择或填写行动'); return; }
+    UI._onlineCall(OnlineClient.submitAction(custom ? { custom: { text: custom } } : { choiceId: UI._onlineChoiceId }));
+  } else if (action === 'cancel') {
+    UI._onlineCall(OnlineClient.cancelAction());
+  } else if (action === 'retry') {
+    UI._onlineCall(OnlineClient.retryNarration());
+  }
+};
 
 /** 从开界屏创建房间，进入大厅 */
 UI.createRoom = function () {
@@ -2308,6 +2455,40 @@ UI.init = function () {
   document.getElementById('btn-random-setup').addEventListener('click', function () { UI.randomizeSetup(); });
   // V3.1 主入口：创建房间入局
   document.getElementById('btn-create-room').addEventListener('click', UI.createRoom);
+  // V3.4.0 真实联机入口
+  if (typeof OnlineClient !== 'undefined') {
+    OnlineClient.onRoomView(UI.renderOnlineView);
+    OnlineClient.onStatus(function (status) {
+      var el = document.getElementById('online-status');
+      if (el && status === 'disconnected') el.textContent = '连接中断，正在尝试重连……';
+    });
+    document.getElementById('btn-online-mode').addEventListener('click', UI.openOnline);
+    document.getElementById('btn-online-back').addEventListener('click', function () {
+      OnlineClient.close();
+      UI.switchScreen('intro');
+    });
+    document.getElementById('btn-online-create').addEventListener('click', function () {
+      var name = (document.getElementById('online-name').value || '').trim() || '房主';
+      var seed = (document.getElementById('seed-input').value || '').trim() || ('ONLINE-' + Date.now());
+      UI._onlineCall(OnlineClient.createRoom({ hostName: name, seed: seed }));
+    });
+    document.getElementById('btn-online-join').addEventListener('click', function () {
+      var name = (document.getElementById('online-name').value || '').trim() || '云游修士';
+      var code = (document.getElementById('online-room-code').value || '').trim();
+      if (!/^\d{6}$/.test(code)) { UI.toast('请输入 6 位房间码'); return; }
+      UI._onlineCall(OnlineClient.joinRoom(code, name));
+    });
+  } else {
+    document.getElementById('btn-online-mode').addEventListener('click', function () { UI.toast('online-client.js 未加载'); });
+  }
+  document.getElementById('online-view').addEventListener('click', function (event) {
+    var arc = event.target.closest('[data-online-arc]');
+    if (arc) { UI._onlineArcId = arc.getAttribute('data-online-arc'); UI.renderOnlineView(UI.onlineView); return; }
+    var choice = event.target.closest('[data-online-choice]');
+    if (choice) { UI._onlineChoiceId = choice.getAttribute('data-online-choice'); UI.renderOnlineView(UI.onlineView); return; }
+    var action = event.target.closest('[data-online]');
+    if (action) UI.handleOnlineAction(action.getAttribute('data-online'));
+  });
   // V3 单人兼容入口（直接调用 Story.startGame，不经房间层）
   var quickSolo = document.getElementById('btn-quick-solo');
   if (quickSolo) {

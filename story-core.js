@@ -1,8 +1,8 @@
 /**
  * ============================================================================
- * 《修行局》V3.3.5 —— 叙事事务化 + 共享场景 + 场景实体 + 卷纲导演可观测
+ * 《修行局》V3.4.0 —— 导演清污 + 权威 WebSocket 联机后端
  * ============================================================================
- * 核心原则（V3.3.5）：
+ * 核心原则（V3.4.0）：
  *   先结算，后写文。先写账本，后写小说。
  *   玩家行动 → IntentParser 识别意图 → TurnResolver 本地确定结果/代价/时间/
  *   关系/世界变化 → StateDelta 写入账本与场景 → ChoiceFactory 本地生成下一轮选项
@@ -74,7 +74,7 @@ Story.createRng = function (seed, sub) {
  * §1 常量：七枚开界骰 / 地貌 / 天道 / 人格 / AI 同伴模板
  * ============================================================ */
 
-Story.VERSION = '3.3.5';
+Story.VERSION = '3.4.0';
 
 /** V3.3 回合状态机阶段（Narration Transaction） */
 Story.TURN_PHASES = ['collecting', 'locked', 'resolving', 'awaiting_narration', 'narration_failed', 'published'];
@@ -299,6 +299,7 @@ Story.createEmptyState = function (seed) {
         phase: 'inactive',         // inactive | voting | active | completed
         candidates: [],
         votesByActorId: {},
+        generatedRecipes: {},     // V3.3.6：测试/未来动态卷纲的房间级 Recipe
         activeArc: null,           // { arcId, recipeId, family, title, publicPitch, tags, status, startedAtChapter, currentBeatIndex, beats, pressureClocks, divergenceLog, revealLog }
         dormantArcs: [],
         completedArcs: [],
@@ -365,8 +366,9 @@ Story.Migration.migrateToV32 = function (s) {
   // V3.3.2 Director
   if (!st.director) st.director = {
     phase: 'inactive', candidates: [], votesByActorId: {},
-    activeArc: null, dormantArcs: [], completedArcs: [], lastDirectorEvent: null,
+    generatedRecipes: {}, activeArc: null, dormantArcs: [], completedArcs: [], lastDirectorEvent: null,
   };
+  if (!st.director.generatedRecipes) st.director.generatedRecipes = {};
   // currentChapter 补 provenance
   if (st.currentChapter && !st.currentChapter.provenance) {
     st.currentChapter.provenance = 'legacy';
@@ -652,6 +654,9 @@ Story._generateOpening = async function (state) {
   if (state.story.director && state.story.director.activeArc) {
     Story.Director.applyArcOpeningScenePatch(state, state.story.director.activeArc);
     Story.Director.applyOpeningSeed(state, state.story.director.activeArc);
+    Story.Director.applyArcAssets(state, state.story.director.activeArc);
+  } else {
+    Story.Director.applyDefaultOpeningAssets(state);
   }
 
   // 2. 开局裁决（不依赖玩家行动，建立初始局面）—— 纯计算，不应用
@@ -1341,6 +1346,9 @@ Story.Scene.Entity = {
           kind: e.kind || 'prop',
           affordances: Array.isArray(e.affordances) ? e.affordances.slice() : [],
           state: e.state || null,
+          threadId: e.threadId || '',
+          sourceThreadId: e.sourceThreadId || '',
+          sourceArcId: e.sourceArcId || '',
         };
       }
       const name = String(e);
@@ -1389,6 +1397,9 @@ Story.AssetRegistry = {
       state: asset.state || 'intact',        // intact | attuned | depleted | sealed
       uses: asset.uses || 0,
       publicHint: asset.publicHint || '',
+      source: asset.source || '',
+      sourceArcId: asset.sourceArcId || '',
+      threadId: asset.threadId || '',
     };
     state.assets.push(a);
     return a;
@@ -2154,12 +2165,79 @@ Story.DirectorOpeningScenePatches = {
 
 Object.keys(Story.DirectorOpeningScenePatches).forEach(function (id) {
   if (Story.DirectorRecipes[id]) {
-    Story.DirectorRecipes[id].openingScenePatch = Story.DirectorOpeningScenePatches[id];
+    var recipe = Story.DirectorRecipes[id];
+    var patch = Story.DirectorOpeningScenePatches[id];
+    var primaryThread = (recipe.openingSeed && recipe.openingSeed.addThreads || []).find(function (t) {
+      return t && t.status !== 'dormant';
+    }) || (recipe.openingSeed && recipe.openingSeed.addThreads || [])[0];
+    var primaryThreadId = primaryThread && primaryThread.threadId;
+    (recipe.openingSeed && recipe.openingSeed.addEntities || []).forEach(function (ent) {
+      if (!ent.threadId && primaryThreadId) ent.threadId = primaryThreadId;
+    });
+    patch.replaceDefaultAssets = true;
+    patch.baseAssets = (recipe.openingSeed && recipe.openingSeed.addEntities || [])
+      .filter(function (ent) { return ent && ['clue', 'relic', 'prop'].indexOf(ent.kind) >= 0; })
+      .map(function (ent) {
+        var assetId = ent.id.replace(/^ent_/, '');
+        if (id === 'sealed_realm' && ent.id === 'ent_seal_keymark') assetId = 'realm_key_shard';
+        return {
+          id: assetId,
+          name: ent.name,
+          kind: ent.kind === 'prop' ? 'item' : ent.kind,
+          state: id === 'sealed_realm' ? 'warm' : 'intact',
+          publicHint: ent.name + '与当前卷纲的异动相互呼应。',
+          threadId: ent.threadId || primaryThreadId || '',
+        };
+      });
+    recipe.openingScenePatch = patch;
   }
 });
 
 /* ---------- Director 核心模块 ---------- */
 Story.Director = {};
+
+/** 房间级动态 Recipe 优先于静态 Recipe。所有运行时读取统一走此入口。 */
+Story.Director.getRecipe = function (state, recipeId) {
+  var d = state && state.story && state.story.director;
+  if (d && d.generatedRecipes && d.generatedRecipes[recipeId]) {
+    return d.generatedRecipes[recipeId];
+  }
+  return Story.DirectorRecipes[recipeId] || null;
+};
+
+Story.Director.listRecipes = function (state) {
+  var all = {};
+  Object.keys(Story.DirectorRecipes).forEach(function (id) { all[id] = Story.DirectorRecipes[id]; });
+  var generated = state && state.story && state.story.director && state.story.director.generatedRecipes || {};
+  Object.keys(generated).forEach(function (id) { all[id] = generated[id]; });
+  return Object.keys(all).map(function (id) { return all[id]; }).filter(Boolean);
+};
+
+/** 推断当前卷纲的主线程，不再假设商会线存在。 */
+Story.Director.getPrimaryThreadId = function (state) {
+  if (!state || !state.story) return null;
+  var threads = state.story.activeThreads || [];
+  var d = state.story.director || {};
+  var arc = d.activeArc;
+  var beat = arc && (arc.beats || [])[arc.currentBeatIndex];
+  var targets = beat && beat.advanceSignals && beat.advanceSignals.targets || [];
+  for (var i = 0; i < targets.length; i++) {
+    var direct = threads.find(function (t) { return t && t.threadId === targets[i] && t.status !== 'completed'; });
+    if (direct) return direct.threadId;
+    var viaTarget = Story.Scene && Story.Scene.threadForTarget
+      ? Story.Scene.threadForTarget(state, state.story.currentScene, targets[i]) : null;
+    if (viaTarget) return viaTarget;
+  }
+  var recipe = arc && Story.Director.getRecipe(state, arc.recipeId);
+  var seeded = recipe && recipe.openingSeed && recipe.openingSeed.addThreads || [];
+  var seededActive = seeded.find(function (t) { return t && t.threadId && t.status !== 'dormant'; }) || seeded[0];
+  if (seededActive && threads.some(function (t) { return t.threadId === seededActive.threadId; })) return seededActive.threadId;
+  var sceneIds = state.story.currentScene && state.story.currentScene.activeThreadIds || [];
+  var sceneThread = sceneIds.find(function (id) {
+    return threads.some(function (t) { return t.threadId === id && t.status !== 'completed'; });
+  });
+  return sceneThread || null;
+};
 
 Story.Director._actionCategory = function (action) {
   return (action && (action.intentCategory || action.category)) || 'freeform';
@@ -2222,7 +2300,7 @@ Story.Director.scoreRecipe = function (state, recipe) {
  *   - 权重影响但不锁死结果。
  */
 Story.Director.generateCandidates = function (state) {
-  var recipes = Object.keys(Story.DirectorRecipes).map(function (k) { return Story.DirectorRecipes[k]; });
+  var recipes = Story.Director.listRecipes(state);
   var rng = Story.rngFor('director', state);
   // 计算权重
   var scored = recipes.map(function (r) {
@@ -2279,7 +2357,7 @@ Story.Director.activateArc = function (state, arcId) {
   var d = state.story.director;
   var candidate = d.candidates.find(function (c) { return c.arcId === arcId; });
   if (!candidate) throw new Error('未找到候选卷纲：' + arcId);
-  var recipe = Story.DirectorRecipes[candidate.recipeId];
+  var recipe = Story.Director.getRecipe(state, candidate.recipeId);
   if (!recipe) throw new Error('未找到 Recipe：' + candidate.recipeId);
   // 构造 activeArc
   var arc = {
@@ -2344,7 +2422,7 @@ Story.Director.activateArc = function (state, arcId) {
 
 Story.Director.applyOpeningSeed = function (state, activeArc) {
   if (!state || !activeArc) return;
-  var recipe = Story.DirectorRecipes[activeArc.recipeId];
+  var recipe = Story.Director.getRecipe(state, activeArc.recipeId);
   if (!recipe || !recipe.openingSeed) return;
   state.story.activeThreads = state.story.activeThreads || [];
   var existingThreads = {};
@@ -2386,6 +2464,9 @@ Story.Director.applyOpeningSeed = function (state, activeArc) {
         name: e.name,
         kind: e.kind,
         affordances: (e.affordances || []).slice(),
+        threadId: e.threadId || '',
+        sourceThreadId: e.sourceThreadId || '',
+        sourceArcId: activeArc.arcId,
       });
     });
   }
@@ -2397,7 +2478,7 @@ Story.Director.applyOpeningSeed = function (state, activeArc) {
 
 Story.Director.applyArcOpeningScenePatch = function (state, activeArc) {
   if (!state || !activeArc || !state.story) return;
-  var recipe = Story.DirectorRecipes[activeArc.recipeId];
+  var recipe = Story.Director.getRecipe(state, activeArc.recipeId);
   var patch = recipe && recipe.openingScenePatch;
   var scene = state.story.currentScene;
   if (!patch || !scene) return;
@@ -2427,6 +2508,55 @@ Story.Director.applyArcOpeningScenePatch = function (state, activeArc) {
   scene.recentEvents = scene.recentEvents || [];
   scene.recentEvents.push('卷纲开局：' + activeArc.title);
   Story.Scene._syncActorsToScene(state, scene);
+};
+
+/** 注册无卷纲 fallback 的开局资产。 */
+Story.Director.applyDefaultOpeningAssets = function (state) {
+  if (!state || !state.story || !state.story.currentScene) return;
+  var scene = state.story.currentScene;
+  var ownerId = state.actors[0] && state.actors[0].id || null;
+  Story.AssetRegistry.register(state, {
+    id: 'residual_sword', name: '残剑', kind: 'relic', ownerActorId: ownerId,
+    locationId: scene.locationId, state: 'attuned', publicHint: '剑身微颤，似有灵识。',
+    source: 'default_opening', threadId: 'thread_old_sword',
+  });
+  Story.AssetRegistry.register(state, {
+    id: 'trade_letter', name: '半封商会密信', kind: 'clue', ownerActorId: null,
+    locationId: scene.locationId, state: 'intact', publicHint: '雨水浸坏了一半字迹。',
+    source: 'default_opening', threadId: 'thread_trade_letter',
+  });
+};
+
+/** 用当前卷纲资产替换 fallback 资产，并同步场景可用资产。 */
+Story.Director.applyArcAssets = function (state, activeArc) {
+  if (!state || !activeArc || !state.story) return;
+  var recipe = Story.Director.getRecipe(state, activeArc.recipeId);
+  var patch = recipe && recipe.openingScenePatch || {};
+  var seed = recipe && recipe.openingSeed || {};
+  if (patch.replaceDefaultAssets) {
+    state.assets = (state.assets || []).filter(function (asset) {
+      return asset && asset.source !== 'default_opening' && asset.id !== 'trade_letter' && asset.id !== 'residual_sword';
+    });
+  }
+  var scene = state.story.currentScene;
+  var assets = (patch.baseAssets || []).concat(seed.addAssets || []);
+  assets.forEach(function (asset) {
+    if (!asset || !asset.id) return;
+    Story.AssetRegistry.register(state, Object.assign({}, Story._clone(asset), {
+      locationId: asset.locationId || (scene && scene.locationId) || null,
+      source: asset.source || 'arc_opening',
+      sourceArcId: activeArc.arcId,
+    }));
+  });
+  if (scene) {
+    scene.availableAssets = assets.map(function (asset) {
+      return {
+        id: asset.id, name: asset.name || asset.id, kind: asset.kind || 'item',
+        affordances: asset.kind === 'relic' ? ['use_relic', 'investigate'] : ['investigate', 'observe'],
+        threadId: asset.threadId || '', sourceArcId: activeArc.arcId,
+      };
+    });
+  }
 };
 
 /* ---------- DirectorVote 投票模块 ---------- */
@@ -2773,7 +2903,7 @@ Story.DirectorVote.autoVoteForBot = function (state, actorId) {
   var rng = Story.rngFor('director', state);
   // 简单权重：道途偏好 + 标签匹配
   var scored = d.candidates.map(function (c) {
-    var recipe = Story.DirectorRecipes[c.recipeId];
+    var recipe = Story.Director.getRecipe(state, c.recipeId);
     var s = Story.Director.scoreRecipe(state, recipe);
     // 角色个人偏好
     if (actor.choicePrefs) {
@@ -2885,11 +3015,6 @@ Story.Scene.createOpeningScene = function (state) {
     recentEvents: [],
     hiddenFacts: [],
   };
-  // V3.3 Phase 3：登记资产到 AssetRegistry
-  if (state.assets) {
-    Story.AssetRegistry.register(state, { id: 'residual_sword', name: '残剑', kind: 'relic', ownerActorId: (state.actors[0] && state.actors[0].id) || null, locationId: 'inn_redsand', state: 'attuned', publicHint: '剑身微颤，似有灵识。' });
-    Story.AssetRegistry.register(state, { id: 'trade_letter', name: '半封商会密信', kind: 'clue', ownerActorId: null, locationId: 'inn_redsand', state: 'intact', publicHint: '雨水浸坏了一半字迹。' });
-  }
   // V3.3 Phase 2：角色同步到开局场景
   Story.Scene._syncActorsToScene(state, scene);
   return scene;
@@ -3109,6 +3234,25 @@ Story.Resolver.buildOpeningEnvelope = function (state) {
   };
 };
 
+/** 从线程、场景实体或资产目标反查其所属线程。 */
+Story.Scene.threadForTarget = function (state, scene, targetId) {
+  if (!state || !state.story || !targetId) return null;
+  var threads = state.story.activeThreads || [];
+  var direct = threads.find(function (t) { return t && t.threadId === targetId; });
+  if (direct) return direct.threadId;
+  scene = scene || state.story.currentScene;
+  var entities = Story.Scene.Entity.normalize(scene && scene.visibleEntities)
+    .concat(Story.Scene.Entity.normalize(scene && scene.availableAssets))
+    .concat(Story.Scene.Entity.normalize(scene && scene.exits));
+  var ent = entities.find(function (e) { return e.id === targetId; });
+  var linked = ent && (ent.threadId || ent.sourceThreadId);
+  if (!linked) {
+    var asset = Story.AssetRegistry.get(state, targetId) || Story.AssetRegistry.get(state, String(targetId).replace(/^ent_/, ''));
+    linked = asset && asset.threadId;
+  }
+  return linked && threads.some(function (t) { return t.threadId === linked; }) ? linked : null;
+};
+
 /**
  * 导演可观测快照：供 UI、房间事件、测试与导出层读取。
  * 只读汇总，不暴露隐藏 dormant 细节，不修改状态。
@@ -3218,6 +3362,13 @@ Story.Resolver._threadById = function (state, id) {
   return (state.story.activeThreads || []).find(function (t) { return t.threadId === id; });
 };
 
+Story.Resolver._threadForIntent = function (state, scene, intent) {
+  if (!intent) return Story.Director.getPrimaryThreadId(state);
+  return Story.Scene.threadForTarget(state, scene, intent.targetId)
+    || Story.Director.getPrimaryThreadId(state)
+    || null;
+};
+
 Story.Resolver._resolveRest = function (state, scene, intent, base, rng) {
   const actor = state.actors.find(function (a) { return a.id === intent.actorId; });
   let outcome = 'quiet_success';
@@ -3231,9 +3382,10 @@ Story.Resolver._resolveRest = function (state, scene, intent, base, rng) {
   const costs = [];
   // deadline 推进
   if (scene && scene.deadline && scene.deadline.remaining > 0) {
-    base.threadEffects.push({ threadId: 'thread_trade_letter', op: 'deadline_advance', delta: 1 });
+    var pressureThreadId = Story.Resolver._threadForIntent(state, scene, intent);
+    if (pressureThreadId) base.threadEffects.push({ threadId: pressureThreadId, op: 'deadline_advance', delta: 1 });
     if (scene.deadline.remaining - 1 <= 0) {
-      costs.push({ type: 'missed_opportunity', text: '商会使者已在雨夜离城。' });
+      costs.push({ type: 'missed_opportunity', text: (scene.deadline.type || '当前时限') + '已经耗尽。' });
       outcome = 'missed_opportunity';
     }
   }
@@ -3267,7 +3419,10 @@ Story.Resolver._resolveWait = function (state, scene, intent, base, rng) {
   base.outcome = 'quiet_success';
   base.gains = [{ type: 'info', text: '获得观察时间，等待他人行动。' }];
   base.costs = [{ type: 'world_advance', text: '世界线程继续推进。' }];
-  if (scene && scene.deadline) base.threadEffects.push({ threadId: 'thread_trade_letter', op: 'deadline_advance', delta: 1 });
+  if (scene && scene.deadline) {
+    var pressureThreadId = Story.Resolver._threadForIntent(state, scene, intent);
+    if (pressureThreadId) base.threadEffects.push({ threadId: pressureThreadId, op: 'deadline_advance', delta: 1 });
+  }
   base.publicEffects = [actor.name + '按兵不动。'];
   return base;
 };
@@ -3286,15 +3441,14 @@ Story.Resolver._resolveObserve = function (state, scene, intent, base, rng) {
 Story.Resolver._resolveInvestigate = function (state, scene, intent, base, rng) {
   const actor = state.actors.find(function (a) { return a.id === intent.actorId; });
   // 必须有具体对象；推进对应 thread，不得同时推进无关线程
-  let threadId = 'thread_trade_letter';
-  if (intent.targetType === 'clue' && intent.targetId === 'scene_anomaly') threadId = 'thread_trade_letter';
-  if (intent.derivedTags.indexOf('use_relic') >= 0) threadId = 'thread_old_sword';
+  let threadId = Story.Resolver._threadForIntent(state, scene, intent);
   const thread = Story.Resolver._threadById(state, threadId);
+  const threadTitle = thread ? thread.title : '当前线索';
   base.outcome = rng.chance(0.7) ? 'success' : 'partial_success';
-  base.gains = [{ type: 'clue', text: '推进' + (thread ? thread.title : '密信') + '的调查。' }];
+  base.gains = [{ type: 'clue', text: '推进' + threadTitle + '的调查。' }];
   base.costs = [{ type: 'exposure', text: '行动有所暴露，可能引起警觉。' }];
-  base.threadEffects.push({ threadId: threadId, op: 'advance', delta: 1 });
-  base.publicEffects = [actor.name + '着手追查' + (thread ? thread.title : '密信') + '。'];
+  if (threadId) base.threadEffects.push({ threadId: threadId, op: 'advance', delta: 1 });
+  base.publicEffects = [actor.name + '着手追查' + threadTitle + '。'];
   return base;
 };
 
@@ -3307,7 +3461,8 @@ Story.Resolver._resolveSocial = function (state, scene, intent, base, rng) {
   // 关系变化
   if (intent.targetType === 'npc' && intent.targetId === 'innkeeper_01') {
     base.relationEffects.push({ actorId: intent.actorId, targetId: 'innkeeper_01', axis: 'trust', delta: 1, publicHint: '女掌柜似乎愿意多说几句。' });
-    base.threadEffects.push({ threadId: 'thread_trade_letter', op: 'advance', delta: 1 });
+    var socialThreadId = Story.Resolver._threadForIntent(state, scene, intent);
+    if (socialThreadId) base.threadEffects.push({ threadId: socialThreadId, op: 'advance', delta: 1 });
   } else if (intent.targetType === 'npc' && state.actors.some(function (a) { return a.id === intent.targetId; })) {
     base.relationEffects.push({ actorId: intent.actorId, targetId: intent.targetId, axis: 'trust', delta: rng.chance(0.7) ? 1 : -1, publicHint: '两人之间的态度发生细微变化。' });
   }
@@ -3380,12 +3535,17 @@ Story.Resolver._resolveDeceive = function (state, scene, intent, base, rng) {
 
 Story.Resolver._resolveUseRelic = function (state, scene, intent, base, rng) {
   const actor = state.actors.find(function (a) { return a.id === intent.actorId; });
+  const visible = Story.Scene.Entity.normalize(scene && scene.visibleEntities)
+    .concat(Story.Scene.Entity.normalize(scene && scene.availableAssets));
+  const relic = visible.find(function (ent) { return ent.id === intent.targetId; });
+  const relicName = relic ? relic.name : '眼前法器';
+  const threadId = Story.Resolver._threadForIntent(state, scene, intent);
   base.outcome = 'success';
-  base.gains = [{ type: 'relic_resonance', text: '残剑产生共鸣。' }];
+  base.gains = [{ type: 'relic_resonance', text: relicName + '产生共鸣。' }];
   base.costs = [{ type: 'relic_will', text: '法宝有灵，可能提出要求。' }];
-  base.threadEffects.push({ threadId: 'thread_old_sword', op: 'advance', delta: 1 });
-  base.privateEffects.push('残剑的剑灵似有回应，却仍不肯相认。');
-  base.publicEffects = [actor.name + '以残剑为媒，触动剑意。'];
+  if (threadId) base.threadEffects.push({ threadId: threadId, op: 'advance', delta: 1 });
+  base.privateEffects.push(relicName + '传来若有若无的灵性回应。');
+  base.publicEffects = [actor.name + '以' + relicName + '为媒，触动其中灵性。'];
   return base;
 };
 
@@ -3415,8 +3575,9 @@ Story.Resolver._resolveTravel = function (state, scene, intent, base, rng) {
   base.outcome = 'success';
   base.gains = [{ type: 'location', text: '抵达新地点。' }];
   base.costs = [{ type: 'time', text: '路途耗时数日。' }, { type: 'exposure', text: '路途存在追踪或风险。' }];
-  base.threadEffects.push({ threadId: 'thread_trade_letter', op: 'advance', delta: 1 });
-  base.publicEffects = [actor.name + '动身追赶商队，地点已变。'];
+  var threadId = Story.Resolver._threadForIntent(state, scene, intent);
+  if (threadId) base.threadEffects.push({ threadId: threadId, op: 'advance', delta: 1 });
+  base.publicEffects = [actor.name + '动身前往' + ((intent.targetId && intent.targetId !== 'nearest_exit') ? intent.targetId : '下一处地点') + '。'];
   return base;
 };
 
@@ -3797,6 +3958,23 @@ Story.ChoiceFactory._activeDirectorBeat = function (state) {
   return beat;
 };
 
+Story.ChoiceFactory._threadForEntity = function (state, ent) {
+  if (!state || !ent) return null;
+  if (ent.threadId) return ent.threadId;
+  if (ent.sourceThreadId) return ent.sourceThreadId;
+  var arc = state.story && state.story.director && state.story.director.activeArc;
+  if (ent.sourceArcId && arc && ent.sourceArcId === arc.arcId) return Story.Director.getPrimaryThreadId(state);
+  var beat = Story.ChoiceFactory._activeDirectorBeat(state);
+  var targets = beat && beat.advanceSignals && beat.advanceSignals.targets || [];
+  for (var i = 0; i < targets.length; i++) {
+    var linked = Story.Scene.threadForTarget(state, state.story.currentScene, targets[i]);
+    if (linked) return linked;
+  }
+  return Story.Scene.threadForTarget(state, state.story.currentScene, ent.id)
+    || Story.Director.getPrimaryThreadId(state)
+    || null;
+};
+
 Story.ChoiceFactory.buildArcChoice = function (state, actor, scene, beat) {
   if (!state || !actor || !scene || !beat) return null;
   var signals = beat.advanceSignals || {};
@@ -3853,7 +4031,7 @@ Story.ChoiceFactory.buildArcChoice = function (state, actor, scene, beat) {
     expectedCosts: [],
     tags: ['arc', 'director', category],
     sourceSceneId: scene.sceneId,
-    primaryThreadId: targetType === 'thread' ? target.id : null,
+    primaryThreadId: targetType === 'thread' ? target.id : Story.ChoiceFactory._threadForEntity(state, target),
     directorRole: 'arc',
   };
 };
@@ -3863,33 +4041,37 @@ Story.ChoiceFactory.buildArcChoice = function (state, actor, scene, beat) {
 Story.ChoiceFactory._ENTITY_BUILDERS = {
   npc: function (ent, actor, state, scene, mk) {
     var name = ent.name; var id = ent.id; var acts = [];
-    if (Story.Scene.Entity.affordance(ent, 'social'))   acts.push(mk('social',    'pressure', 'npc', id, '逼问' + name + '。', '可能换取情报，但关系恶化。', ['social', 'secret'], 2, 'thread_trade_letter', '片刻'));
-    if (Story.Scene.Entity.affordance(ent, 'negotiate')) acts.push(mk('negotiate', 'ally',     'npc', id, '与' + name + '谈条件。', '可能达成交换，留下承诺。', ['negotiate', 'pact'], 2, 'thread_trade_letter', '片刻'));
+    var threadId = Story.ChoiceFactory._threadForEntity(state, ent);
+    if (Story.Scene.Entity.affordance(ent, 'social'))   acts.push(mk('social',    'pressure', 'npc', id, '逼问' + name + '。', '可能换取情报，但关系恶化。', ['social', 'secret'], 2, threadId, '片刻'));
+    if (Story.Scene.Entity.affordance(ent, 'negotiate')) acts.push(mk('negotiate', 'ally',     'npc', id, '与' + name + '谈条件。', '可能达成交换，留下承诺。', ['negotiate', 'pact'], 2, threadId, '片刻'));
     if (Story.Scene.Entity.affordance(ent, 'observe'))   acts.push(mk('observe',   'covert',   'npc', id, '留意' + name + '的举动。', '观察中获取细节。', ['observe', 'info'], 1, null, '片刻'));
     return acts;
   },
   clue: function (ent, actor, state, scene, mk) {
     var name = ent.name; var id = ent.id; var acts = [];
-    if (Story.Scene.Entity.affordance(ent, 'investigate')) acts.push(mk('investigate', 'pursue', 'clue', id, '调查' + name + '。', '可能推进线索，但会暴露意图。', ['investigate', 'clue'], 2, id, '数日'));
-    if (Story.Scene.Entity.affordance(ent, 'observe'))     acts.push(mk('observe',     'covert', 'clue', id, '小心探查' + name + '。', '获得细节，少量时间。', ['observe', 'info'], 1, id, '片刻'));
+    var threadId = Story.ChoiceFactory._threadForEntity(state, ent);
+    if (Story.Scene.Entity.affordance(ent, 'investigate')) acts.push(mk('investigate', 'pursue', 'clue', id, '调查' + name + '。', '可能推进线索，但会暴露意图。', ['investigate', 'clue'], 2, threadId, '数日'));
+    if (Story.Scene.Entity.affordance(ent, 'observe'))     acts.push(mk('observe',     'covert', 'clue', id, '小心探查' + name + '。', '获得细节，少量时间。', ['observe', 'info'], 1, threadId, '片刻'));
     return acts;
   },
   relic: function (ent, actor, state, scene, mk) {
     var name = ent.name; var id = ent.id; var acts = [];
-    if (Story.Scene.Entity.affordance(ent, 'use_relic'))   acts.push(mk('use_relic',  'insight', 'relic', id, '以' + name + '为媒，触动灵性。', '推进遗物线索，但法宝有灵。', ['use_relic', 'fate'], 2, id, '片刻'));
-    if (Story.Scene.Entity.affordance(ent, 'investigate')) acts.push(mk('investigate', 'pursue', 'relic', id, '研究' + name + '的来历。', '可能揭示遗物秘密。', ['investigate', 'clue'], 2, id, '数日'));
+    var threadId = Story.ChoiceFactory._threadForEntity(state, ent);
+    if (Story.Scene.Entity.affordance(ent, 'use_relic'))   acts.push(mk('use_relic',  'insight', 'relic', id, '以' + name + '为媒，触动灵性。', '推进遗物线索，但法宝有灵。', ['use_relic', 'fate'], 2, threadId, '片刻'));
+    if (Story.Scene.Entity.affordance(ent, 'investigate')) acts.push(mk('investigate', 'pursue', 'relic', id, '研究' + name + '的来历。', '可能揭示遗物秘密。', ['investigate', 'clue'], 2, threadId, '数日'));
     return acts;
   },
   exit: function (ent, actor, state, scene, mk) {
     var name = ent.name; var id = ent.id; var acts = [];
-    if (Story.Scene.Entity.affordance(ent, 'travel')) acts.push(mk('travel', 'pursue', 'exit', id, '前往' + name + '。', '地点改变，路途有风险。', ['travel', 'risk'], 3, null, '数日'));
+    var threadId = Story.ChoiceFactory._threadForEntity(state, ent);
+    if (Story.Scene.Entity.affordance(ent, 'travel')) acts.push(mk('travel', 'pursue', 'exit', id, '前往' + name + '。', '地点改变，路途有风险。', ['travel', 'risk'], 3, threadId, '数日'));
     if (Story.Scene.Entity.affordance(ent, 'flee') && (scene.pressure || 0) >= 2)
-      acts.push(mk('flee', 'evade', 'exit', id, '从' + name + '撤离。', '暂脱危险，但追兵不散。', ['flee', 'risk'], 3, null, '片刻'));
+      acts.push(mk('flee', 'evade', 'exit', id, '从' + name + '撤离。', '暂脱危险，但追兵不散。', ['flee', 'risk'], 3, threadId, '片刻'));
     return acts;
   },
   prop: function (ent, actor, state, scene, mk) {
     var name = ent.name; var id = ent.id; var acts = [];
-    if (Story.Scene.Entity.affordance(ent, 'observe')) acts.push(mk('observe', 'covert', 'prop', id, '观察' + name + '。', '获得细节，少量时间。', ['observe', 'info'], 1, null, '片刻'));
+    if (Story.Scene.Entity.affordance(ent, 'observe')) acts.push(mk('observe', 'covert', 'prop', id, '观察' + name + '。', '获得细节，少量时间。', ['observe', 'info'], 1, Story.ChoiceFactory._threadForEntity(state, ent), '片刻'));
     return acts;
   },
 };
@@ -3952,11 +4134,12 @@ Story.ChoiceFactory._awayPool = function (state, actor, scene, mk) {
     '返回' + homeLoc + '，与同行者会合。', '离队者归队，重新加入共同场景。', ['travel', 'rejoin'], 2, null, '片刻'));
   // 2. 推进离队计划（基于离队时的目标地点）
   var locName = actor.locationId || '前方';
+  var primaryThreadId = Story.Director.getPrimaryThreadId(state);
   if (locName === 'road_broken_flow') {
     pool.push(mk('travel', 'pursue', 'exit', 'offscreen_pursue',
-      '沿古道继续追踪商队车辙。', '独行追迹，风险自负。', ['travel', 'risk'], 3, 'thread_trade_letter', '数日'));
+      '沿古道继续追踪车辙。', '独行追迹，风险自负。', ['travel', 'risk'], 3, primaryThreadId, '数日'));
     pool.push(mk('investigate', 'pursue', 'clue', 'offscreen_clue',
-      '在古道岔路设伏，等待商队折返。', '可能截获线索，但耗时。', ['investigate', 'clue'], 3, 'thread_trade_letter', '数日'));
+      '在古道岔路设伏，等待目标折返。', '可能截获线索，但耗时。', ['investigate', 'clue'], 3, primaryThreadId, '数日'));
   } else {
     pool.push(mk('investigate', 'pursue', 'clue', 'offscreen_clue',
       '在' + locName + '搜寻线索。', '独行探索，风险自负。', ['investigate', 'clue'], 3, null, '数日'));
@@ -4137,6 +4320,41 @@ Story.Narration.buildBrief = function (state, scene, envelope) {
     });
   }
 
+  var directorGuide = Story.Director.buildNarrativeGuide(state) || null;
+  var isOpening = !!(envelope && envelope.turnId === 'turn_0000');
+  var openingAnchorGroups = { location: [], arc: [], pressure: [] };
+  if (isOpening) {
+    openingAnchorGroups.location.push((scene && scene.locationName) || '');
+    Story.Scene.Entity.normalize(scene && scene.visibleEntities).slice(0, 3).forEach(function (ent) {
+      openingAnchorGroups.location.push(ent.name || '');
+    });
+    if (directorGuide) {
+      openingAnchorGroups.arc.push(directorGuide.arcTitle || '', directorGuide.currentBeatTitle || '', directorGuide.dramaticGoal || '');
+      (directorGuide.pressureClocks || []).forEach(function (clock) {
+        openingAnchorGroups.pressure.push(clock.label || '');
+      });
+    }
+    openingAnchorGroups.pressure.push(
+      (scene && scene.immediateConflict) || '',
+      (scene && scene.immediateQuestion) || '',
+      (scene && scene.deadline && scene.deadline.type) || ''
+    );
+    (state.story.activeThreads || []).filter(function (t) {
+      return t && (t.status === 'active' || t.status === 'dormant');
+    }).slice(0, 2).forEach(function (thread) {
+      openingAnchorGroups.pressure.push(thread.title || '');
+    });
+    Object.keys(openingAnchorGroups).forEach(function (key) {
+      openingAnchorGroups[key] = openingAnchorGroups[key].filter(Boolean);
+    });
+  }
+  var openingAnchors = [];
+  Object.keys(openingAnchorGroups).forEach(function (key) {
+    openingAnchorGroups[key].forEach(function (anchor) {
+      if (openingAnchors.indexOf(anchor) < 0) openingAnchors.push(anchor);
+    });
+  });
+
   return {
     chapterIndex: s.chapterIndex + 1,
     world: { name: w.name, year: Math.floor(w.year), toneTags: toneTags },
@@ -4149,9 +4367,12 @@ Story.Narration.buildBrief = function (state, scene, envelope) {
     focalActors: focalActors,
     narrationBeats: (envelope && envelope.narrationBeats) || [],
     coverageAnchors: coverageAnchors,
+    isOpening: isOpening,
+    openingAnchors: openingAnchors,
+    openingAnchorGroups: openingAnchorGroups,
     forbiddenLeaks: forbiddenLeaks,
     // V3.3.2：Director 叙事引导——告知 AI 当前卷纲与节拍目标
-    director: Story.Director.buildNarrativeGuide(state) || null,
+    director: directorGuide,
     style: {
       proseLength: '450-850 Chinese characters',
       paragraphCount: '3-5',
@@ -4224,10 +4445,46 @@ Story.Narration._coverageTokens = function (items) {
     .slice(0, 8);
 };
 
+Story.Narration._openingTokens = function (items) {
+  var stop = ['是否', '当前', '正在', '为何', '一个', '已经', '进入', '开始', '真正', '玩家', '卷纲', '开局'];
+  var source = Array.isArray(items) ? items.join(' ') : String(items || '');
+  var words = source.match(/[\u4e00-\u9fa5A-Za-z0-9]{2,}/g) || [];
+  var tokens = [];
+  words.forEach(function (word) {
+    if (stop.indexOf(word) < 0) tokens.push(word);
+    if (/^[\u4e00-\u9fa5]+$/.test(word)) {
+      for (var i = 0; i < word.length - 1; i++) {
+        var pair = word.slice(i, i + 2);
+        if (stop.indexOf(pair) < 0) tokens.push(pair);
+      }
+    }
+  });
+  return tokens.filter(function (token, i, arr) { return token && arr.indexOf(token) === i; }).slice(0, 40);
+};
+
 Story.Narration.validateCoverage = function (narration, brief) {
-  if (!brief || !brief.director || !brief.director.beatResult) return null;
+  if (!brief) return null;
   var parsed = Story.Provider.parseNarrationResponse(narration);
   var text = String((parsed && parsed.chapter) || '');
+  if (brief.isOpening || (brief._envelope && brief._envelope.turnId === 'turn_0000')) {
+    var groups = brief.openingAnchorGroups || {};
+    var labels = { location: '地点或核心实体', arc: '卷纲或当前节拍', pressure: '冲突、时限或线程' };
+    var missingGroups = [];
+    ['location', 'arc', 'pressure'].forEach(function (key) {
+      var tokens = Story.Narration._openingTokens(groups[key] || []);
+      if (tokens.length && !tokens.some(function (token) { return text.indexOf(token) >= 0; })) {
+        missingGroups.push(labels[key]);
+      }
+    });
+    if (missingGroups.length) {
+      return {
+        code: 'MISSING_OPENING_ANCHOR',
+        message: 'AI 开局正文没有落实当前卷纲开局锚点：' + missingGroups.join('、'),
+        rawPreview: text.slice(0, 240),
+      };
+    }
+  }
+  if (!brief.director || !brief.director.beatResult) return null;
   var anchors = (brief.coverageAnchors || []).filter(function (a) { return a && a.controller === 'human'; });
   if (!anchors.length) return null;
   var missing = [];
@@ -4346,7 +4603,7 @@ Story.Provider.capabilities = {
   supportsChatCompletions: true,
 };
 
-Story.Provider.ERROR_CODES = ['NO_API_CONFIG','NO_API_KEY','NETWORK_ERROR','CORS_ERROR','HTTP_401','HTTP_403','HTTP_404','HTTP_429','HTTP_5XX','TIMEOUT','EMPTY_RESPONSE','INVALID_JSON','INVALID_SCHEMA','MODEL_OVERREACH','FORBIDDEN_REVEAL','MISSING_REQUIRED_BEAT'];
+Story.Provider.ERROR_CODES = ['NO_API_CONFIG','NO_API_KEY','NETWORK_ERROR','CORS_ERROR','HTTP_401','HTTP_403','HTTP_404','HTTP_429','HTTP_5XX','TIMEOUT','EMPTY_RESPONSE','INVALID_JSON','INVALID_SCHEMA','MODEL_OVERREACH','FORBIDDEN_REVEAL','MISSING_REQUIRED_BEAT','MISSING_OPENING_ANCHOR'];
 
 /** 调用 AI 叙事（兼容旧 ai.provider.narrate）。返回归一化后的 {title,chapter,dialogues,endingImage,_autoFixed} 或 null。 */
 Story.Provider.narrate = async function (state, brief) {
@@ -5050,10 +5307,16 @@ Story.getOmniscientView = function () {
 Story.getPublicStoryView = function (storyState) {
   if (!storyState) return null;
   const ch = storyState.story.currentChapter;
+  const scene = storyState.story.currentScene;
   return {
+    chapterId: ch ? ch.chapterId : null,
+    chapterIndex: storyState.story.chapterIndex || 0,
     title: ch ? ch.title : '',
     chapter: ch ? ch.chapter : '',
     chapterSummary: ch ? (ch.chapterSummary || '') : '',
+    dialogues: ch && Array.isArray(ch.dialogues) ? Story._clone(ch.dialogues) : [],
+    endingImage: ch ? (ch.endingImage || '') : '',
+    turnPhase: storyState.story.turnPhase || 'collecting',
     year: storyState.world.year,
     worldName: storyState.world.name,
     worldBible: Story._clone(storyState.world.worldBible),
@@ -5063,6 +5326,25 @@ Story.getPublicStoryView = function (storyState) {
     factions: (storyState.world.factions || []).slice(),
     relics: (storyState.ledger.relics || []).slice(),
     activeThreads: (storyState.story.activeThreads || []).slice(-8),
+    scene: scene ? {
+      sceneId: scene.sceneId,
+      locationId: scene.locationId,
+      locationName: scene.locationName,
+      timeOfDay: scene.timeOfDay,
+      weather: scene.weather,
+      immediateConflict: scene.immediateConflict,
+      immediateQuestion: scene.immediateQuestion,
+      deadline: scene.deadline ? Story._clone(scene.deadline) : null,
+      entities: Story.Scene.Entity.normalize(scene.visibleEntities),
+      availableAssets: Story.Scene.Entity.normalize(scene.availableAssets),
+      exits: Story.Scene.Entity.normalize(scene.exits),
+    } : null,
+    assets: Story.AssetRegistry.all(storyState).map(function (asset) {
+      return {
+        id: asset.id, name: asset.name, kind: asset.kind, locationId: asset.locationId,
+        state: asset.state, publicHint: asset.publicHint || '', threadId: asset.threadId || '',
+      };
+    }),
     cast: storyState.actors.map(function (a) {
       return { id: a.id, name: a.name, identity: a.identity, daoPath: a.daoPath, status: a.statusSummary, publicWish: a.publicWish };
     }),

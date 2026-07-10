@@ -58,10 +58,15 @@ function createMockProvider(opts) {
       calls++;
       if (delayMs) await new Promise(function (r) { setTimeout(r, delayMs); });
       if (calls <= failUntil) return fail();
+      var resolvedChapter = chapter;
+      // V3.3.6：默认测试 Provider 应像合规模型一样落实开局锚点；显式传入 chapter 时不自动修补，便于覆盖失败测试。
+      if (!opts.chapter && ctx && ctx.brief && ctx.brief.isOpening && Array.isArray(ctx.brief.openingAnchors)) {
+        resolvedChapter += '开局锚点：' + ctx.brief.openingAnchors.slice(0, 8).join('、') + '。';
+      }
       // 成功：返回 JSON 字符串，包含递增序号便于断言"重试确实再次调用"
       var payload = {
         title: title + '·第' + calls + '回',
-        chapter: chapter,
+        chapter: resolvedChapter,
         dialogues: [],
         endingImage: '',
       };
@@ -115,9 +120,11 @@ function createVariantMockProvider(opts) {
     narrate: async function (ctx) {
       calls++;
       var idx = (calls - 1) % VARIANT_CHAPTERS.length;
+      var anchors = ctx && ctx.brief && ctx.brief.openingAnchors || [];
       var payload = {
         title: VARIANT_TITLES[idx] + '·第' + calls + '回',
-        chapter: VARIANT_CHAPTERS[idx] + '这一夜变故横生，前路愈发难以预料。众人各怀心思，却都未肯先行退去。更鼓再响，而暗流方才涌动。',
+        chapter: VARIANT_CHAPTERS[idx] + '这一夜变故横生，前路愈发难以预料。众人各怀心思，却都未肯先行退去。更鼓再响，而暗流方才涌动。' +
+          (anchors.length ? '开局锚点：' + anchors.slice(0, 8).join('、') + '。' : ''),
         dialogues: [],
         endingImage: '',
       };
