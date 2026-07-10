@@ -1,10 +1,11 @@
 {
   "name": "xiuxianju-v3",
-  "version": "3.3.5",
+  "version": "3.4.0",
   "description": "多人互动跑团文字小说：叙事事务化、AI 必需的稳定引擎（V3.3）",
   "private": true,
   "scripts": {
-    "test": "npm run test:core && npm run test:room && npm run test:regression && npm run test:ai && npm run test:dom && npm run test:v32 && npm run test:transaction && npm run test:experience && npm run test:director",
+    "test": "npm run test:core && npm run test:room && npm run test:regression && npm run test:ai && npm run test:dom && npm run test:v32 && npm run test:transaction && npm run test:experience && npm run test:director && npm run test:director-clean && npm run test:server",
+    "server": "node server/index.js",
     "test:core": "node test-v3.js",
     "test:room": "node test-v31.js",
     "test:regression": "node test-regressions.js",
@@ -13,9 +14,12 @@
     "test:v32": "node test-v32-intent.js && node test-v32-resolver.js && node test-v32-choice.js && node test-v32-provider.js",
     "test:transaction": "node test-v33-transaction.js",
     "test:experience": "node test-v33-experience.js",
-    "test:director": "node test-v332-director-candidates.js && node test-v332-director-vote.js && node test-v332-director-beats.js && node test-v332-director-transaction.js && node test-v332-director-choice.js && node test-v332-director-room.js && node test-v334-director-experience.js && node test-v335-director-observability.js"
+    "test:director": "node test-v332-director-candidates.js && node test-v332-director-vote.js && node test-v332-director-beats.js && node test-v332-director-transaction.js && node test-v332-director-choice.js && node test-v332-director-room.js && node test-v334-director-experience.js && node test-v335-director-observability.js",
+    "test:director-clean": "node test-v336-director-assets-cleanup.js && node test-v336-resolver-thread-binding.js && node test-v336-choice-thread-cleanup.js && node test-v336-opening-coverage.js && node test-v336-room-view-director.js",
+    "test:server": "node test-server/test-server-protocol.js && node test-server/test-server-room-flow.js && node test-server/test-server-narration-failed.js && node test-server/test-server-restart-restore.js"
   },
   "dependencies": {
-    "jsdom": "^25.0.1"
+    "jsdom": "^25.0.1",
+    "ws": "^8.21.0"
   }
 }

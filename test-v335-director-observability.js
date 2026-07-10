@@ -22,6 +22,9 @@ function setupEchoAI() {
         return [a.actorName, a.publicAction, a.targetName, (a.gains || []).join(' '), (a.costs || []).join(' ')].join(' ');
       }).join('。');
       var body = actions || 'Opening scene establishes the selected arc and all actors gather before the first decision.';
+      if (!actions && ctx.brief && Array.isArray(ctx.brief.openingAnchors)) {
+        body += ' 开局锚点：' + ctx.brief.openingAnchors.slice(0, 8).join('、') + '。';
+      }
       body += ' The narration keeps the local ruling intact, shows pressure, consequence, and the next visible problem. '.repeat(8);
       return JSON.stringify({ title: 'Observable Director', chapter: body, dialogues: [], endingImage: '' });
     },
