@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * 《修行局》V3.3.5 — 房间化协调器 + 卷纲导演投票入口（room-core.js）
+ * 《修行局》V3.4.0 — 房间协调器 + 权威联机视图（room-core.js）
  * ============================================================================
  * 职责：管理房间、席位、角色绑定、回合收集、机器人自动落子、统一结算。
  *   Story 只负责叙事，Room 负责秩序与隐私。
@@ -14,11 +14,7 @@
  *   - RoomView.getForSeat（按席位过滤隐私视图）
  *   - 本地存档与恢复
  *
- * 不做（留给后续 Sprint）：
- *   - 房间大厅 UI（Sprint 3）
- *   - 热座交接遮罩（Sprint 3）
- *   - RoomTransport 抽象（Sprint 6）
- *   - 真实联机（Sprint 6）
+ * V3.4.0 由 server/room-runtime.js 在服务端串行调用协调器，浏览器仅持有 RoomView。
  * ============================================================================
  */
 const Room = {};
@@ -31,7 +27,7 @@ const Room = {};
     : (typeof globalThis !== 'undefined' ? globalThis.Story : null);
   if (!Story) throw new Error('story-core.js must be loaded before room-core.js');
 
-  Room.VERSION = '3.3.5';
+  Room.VERSION = '3.4.0';
   Room.MAX_SEATS = 4;
 
   /** 机器人策略模板（影响描述与未来权重，当前决策由 Story.aiChoose 执行） */
@@ -813,10 +809,12 @@ const Room = {};
       if (!seat) return null;
 
       var publicStory = room.storySession ? Story.getPublicStoryView(room.storySession) : null;
+      var eventLog = Array.isArray(room.eventLog) ? room.eventLog : [];
 
       var view = {
         room: {
           roomId: room.roomId,
+          roomCode: room.roomCode || '',
           mode: room.mode,
           status: room.status,
           round: room.turn.round,
@@ -843,6 +841,18 @@ const Room = {};
           }),
         },
         publicStory: publicStory,
+        publicDirector: room.storySession && Story.getDirectorSnapshot
+          ? Story.getDirectorSnapshot(room.storySession)
+          : null,
+        arcVoting: room.directorVote ? {
+          phase: room.directorVote.phase,
+          candidates: Story._clone(room.directorVote.candidates || []),
+          votedSeatIds: Object.keys(room.directorVote.votesBySeatId || {}),
+          selectedArcId: room.directorVote.selectedArcId || null,
+        } : null,
+        publicEvents: eventLog.filter(function (e) {
+          return e && e.visibility === 'public';
+        }).slice(-20),
         ownSeat: {
           seatId: seat.seatId,
           kind: seat.kind,
@@ -852,6 +862,15 @@ const Room = {};
         },
         ownActor: null,
       };
+
+      if (seat.seatId === room.hostSeatId) {
+        view.hostEvents = eventLog.filter(function (e) {
+          return e && e.visibility === 'host';
+        }).slice(-20);
+      }
+      view.ownEvents = eventLog.filter(function (e) {
+        return e && e.visibility === 'seat' && (!e.seatId || e.seatId === seatId);
+      }).slice(-20);
 
       // 私密信息：仅当席位有角色且游戏已开始时
       if (seat.kind !== 'spectator') {
