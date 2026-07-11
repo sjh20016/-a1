@@ -37,9 +37,10 @@ async function callOpenAICompatible(config, ctx, Story) {
     var payload;
     try { payload = JSON.parse(raw); }
     catch (error) { throw new Error('AI 响应不是 JSON'); }
-    var content = payload && payload.choices && payload.choices[0] && payload.choices[0].message && payload.choices[0].message.content;
+    var choice = payload && payload.choices && payload.choices[0];
+    var content = choice && choice.message && choice.message.content;
     if (!content) throw new Error('AI 响应缺少 choices[0].message.content');
-    return content;
+    return { content: content, finishReason: choice.finish_reason || '' };
   } finally {
     clearTimeout(timer);
   }
@@ -57,6 +58,8 @@ function registerServerAI(Story, config, logger, providerOverride) {
     provider: providerOverride ? 'server-injected' : 'server-openai-compatible',
     model: config.aiModel || 'unconfigured',
     base: config.aiBaseUrl || '',
+    enforcePublishGate: !providerOverride,
+    testMode: !!providerOverride,
   });
   return provider;
 }
