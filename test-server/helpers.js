@@ -13,19 +13,28 @@ function createNarrationProvider(control) {
   return {
     narrate: async function (ctx) {
       if (control.fail) throw new Error('mock ai unavailable');
+      if (typeof control.onCall === 'function') control.onCall(ctx);
+      if (control.blockPromise) await control.blockPromise;
+      if (control.delayMs) await new Promise(function (resolve) { setTimeout(resolve, control.delayMs); });
       var anchors = ctx && ctx.brief && ctx.brief.openingAnchors || [];
-      var actions = ctx && ctx.chosenActions || [];
-      var parts = [];
-      if (anchors.length) parts.push('开局锚点：' + anchors.slice(0, 10).join('、'));
-      actions.forEach(function (action) {
-        parts.push([
-          action.actorName, action.publicAction, action.targetName,
-          (action.gains || []).join(' '), (action.costs || []).join(' '), '推进发现调查进展',
-        ].filter(Boolean).join(' '));
+      var turnFacts = ctx && ctx.turnContract && ctx.turnContract.mustRenderFacts || [];
+      var chapterIndex = ctx && ctx.brief && ctx.brief.chapterIndex || 0;
+      var contractParts = [];
+      if (anchors.length) contractParts.push('开局锚点：' + anchors.slice(0, 10).join('、'));
+      turnFacts.forEach(function (fact) {
+        contractParts.push([fact.actorName, fact.actionText]
+          .concat(fact.requiredMeaning || [], fact.gains || [], fact.costs || [])
+          .filter(Boolean).join(' '));
       });
-      parts.push('雨声压低了众人的交谈，既定行动带来的得失逐一落定。所有人都看见局势发生变化，却没有任何超出本地裁决的新事实凭空出现。');
+      var marker = '第' + chapterIndex + '章';
+      contractParts.push(ctx && ctx.brief && ctx.brief.isOpening
+        ? marker + '众人确认眼前环境。' + marker + '当前压力已经显露。' + marker + '首个抉择由此展开。'
+        : marker + '既定行动逐一落定。' + marker + '所得与代价均可见。' + marker + '局势留下新的抉择。');
       return JSON.stringify({
-        title: '联机验收章', chapter: parts.join('。'), dialogues: [], endingImage: '',
+        title: '联机验收章 ' + chapterIndex,
+        chapter: contractParts.join('。'),
+        dialogues: [],
+        endingImage: '',
       });
     },
   };

@@ -5,31 +5,31 @@ function endpointFor(baseUrl) {
   return /\/chat\/completions$/i.test(base) ? base : base + '/chat/completions';
 }
 
-async function callOpenAICompatible(config, ctx) {
+async function callOpenAICompatible(config, ctx, Story) {
   if (!config.aiBaseUrl || !config.aiApiKey || !config.aiModel) {
     throw new Error('AI 服务端配置不完整：需要 AI_BASE_URL、AI_API_KEY、AI_MODEL');
   }
   var controller = new AbortController();
   var timer = setTimeout(function () { controller.abort(); }, config.aiTimeoutMs || 60000);
   try {
+    Story = Story || require('../story-core.js');
+    var requestBody = {
+      model: config.aiModel,
+      messages: [
+        { role: 'system', content: Story.Narration.buildSystemPrompt(ctx) },
+        { role: 'user', content: Story.Narration.buildUserPrompt(ctx) },
+      ],
+      temperature: config.aiTemperature == null ? 0.6 : config.aiTemperature,
+      max_tokens: config.aiMaxTokens || 2600,
+    };
+    if (config.aiJsonMode) requestBody.response_format = { type: config.aiJsonMode };
     var response = await fetch(endpointFor(config.aiBaseUrl), {
       method: 'POST',
       headers: {
         'Authorization': 'Bearer ' + config.aiApiKey,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model: config.aiModel,
-        messages: [
-          {
-            role: 'system',
-            content: '你是《修行局》的叙事 AI。只能返回严格 JSON：{title, chapter, dialogues, endingImage}。不得返回状态字段。正文必须落实 brief 中的 coverageAnchors/openingAnchors 与本地裁决结果。',
-          },
-          { role: 'user', content: JSON.stringify(ctx) },
-        ],
-        temperature: 0.8,
-        max_tokens: 2400,
-      }),
+      body: JSON.stringify(requestBody),
       signal: controller.signal,
     });
     var raw = await response.text();
@@ -51,7 +51,7 @@ function registerServerAI(Story, config, logger, providerOverride) {
     logger.warn('AI_ENABLED=true，但服务端 AI 配置不完整；叙事请求将进入 narration_failed。');
   }
   var provider = providerOverride || {
-    narrate: function (ctx) { return callOpenAICompatible(config, ctx); },
+    narrate: function (ctx) { return callOpenAICompatible(config, ctx, Story); },
   };
   Story.registerAIProvider(provider, {
     provider: providerOverride ? 'server-injected' : 'server-openai-compatible',

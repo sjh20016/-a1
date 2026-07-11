@@ -1,8 +1,8 @@
 /**
  * ============================================================================
- * 《修行局》V3.4.0 —— 导演清污 + 权威 WebSocket 联机后端
+ * 《修行局》V3.4.1 —— 叙事事实管线与真实多人玩法收口
  * ============================================================================
- * 核心原则（V3.4.0）：
+ * 核心原则（V3.4.1）：
  *   先结算，后写文。先写账本，后写小说。
  *   玩家行动 → IntentParser 识别意图 → TurnResolver 本地确定结果/代价/时间/
  *   关系/世界变化 → StateDelta 写入账本与场景 → ChoiceFactory 本地生成下一轮选项
@@ -74,7 +74,7 @@ Story.createRng = function (seed, sub) {
  * §1 常量：七枚开界骰 / 地貌 / 天道 / 人格 / AI 同伴模板
  * ============================================================ */
 
-Story.VERSION = '3.4.0';
+Story.VERSION = '3.4.1';
 
 /** V3.3 回合状态机阶段（Narration Transaction） */
 Story.TURN_PHASES = ['collecting', 'locked', 'resolving', 'awaiting_narration', 'narration_failed', 'published'];
@@ -286,6 +286,8 @@ Story.createEmptyState = function (seed) {
       aiChosenLastTurn: {},
       activeThreads: [],
       recentSummary: '',
+      recentCanonicalSummaries: [],
+      recentNarrations: [],
       chronicle: [],
       recentMotifs: [],
       recentChoiceFingerprints: [],
@@ -324,8 +326,9 @@ Story.createEmptyState = function (seed) {
       enabled: false, provider: 'openai-compatible',
       lastStatus: 'offline', lastErrorCode: null, lastErrorMessage: '',
       lastRequestAt: 0, lastResponseAt: 0,
+      lastSemanticRepair: null,
     },
-    settings: { timePreference: '顺其自然', narrativePace: '常规', mode: 'novel', developerMode: false, showResolutionEcho: true },
+    settings: { timePreference: '顺其自然', narrativePace: '常规', mode: 'novel', pvpMode: 'dramatic', developerMode: false, showResolutionEcho: true },
     finalLegacy: null,
   };
 };
@@ -355,10 +358,13 @@ Story.Migration.migrateToV32 = function (s) {
   if (!st.aiChosenLastTurn) st.aiChosenLastTurn = {};
   if (!st.activeThreads) st.activeThreads = [];
   if (!st.recentSummary) st.recentSummary = '';
+  if (!st.recentCanonicalSummaries) st.recentCanonicalSummaries = [];
+  if (!st.recentNarrations) st.recentNarrations = [];
   if (!st.chronicle) st.chronicle = [];
   if (!st.recentMotifs) st.recentMotifs = [];
   if (!st.recentChoiceFingerprints) st.recentChoiceFingerprints = [];
   if (!st.recentChapterFingerprints) st.recentChapterFingerprints = [];
+  if (!st.recentCanonicalSummaries) st.recentCanonicalSummaries = [];
   if (!st.lastTurnRecordId) st.lastTurnRecordId = null;
   // V3.3 Narration Transaction 字段
   if (!st.turnPhase) st.turnPhase = 'collecting';
@@ -383,7 +389,14 @@ Story.Migration.migrateToV32 = function (s) {
   (s.actors || []).forEach(function (a, i) {
     if (!a.seatId) a.seatId = a.controller === 'human' ? 'seat_0' : ('seat_' + (i + 1));
     if (!a.agentArc) a.agentArc = { currentGoal: a.publicWish || '', stage: 0, pressure: 0, milestones: [], lastChoiceFingerprints: [], lastLocationId: '', lastFocusedChapter: 0 };
-    if (!a.relationships) a.relationships = Story.Delta._buildRelationMap(a, s.actors);
+    // V3.4.1：旧存档可能是逐个创建角色时产生的半张关系表。
+    // 以完整 cast 重建骨架，再覆盖已有轴值，避免丢失历史。
+    const relationBase = Story.Delta._buildRelationMap(a, s.actors);
+    a.relationships = Object.assign(relationBase, a.relationships || {});
+    if (!a.behaviorState) a.behaviorState = {
+      lastActionFingerprint: '', consecutiveSameAction: 0,
+      repeatedCategoryCount: {}, lastTargetId: '', repeatedTargetCount: 0,
+    };
     if (!a.hidden) a.hidden = { realm: '炼气六层', cultivationProgress: 0, injury: 0, resources: [], combatStats: { body: 10, spirit: 10, soul: 10 } };
     if (!a.privateFacts) a.privateFacts = [];
     // V3.3 Phase 2：每角色位置/在场状态
@@ -425,11 +438,13 @@ Story.Migration.migrateToV32 = function (s) {
   if (!s.rng) s.rng = { seed: s.world.seed || '', state: 0 };
   // api
   if (!s.api) s.api = { enabled: false, provider: 'openai-compatible', lastStatus: 'offline', lastErrorCode: null, lastErrorMessage: '', lastRequestAt: 0, lastResponseAt: 0 };
+  if (s.api.lastSemanticRepair === undefined) s.api.lastSemanticRepair = null;
   // settings
   if (!s.settings) s.settings = {};
   if (s.settings.timePreference === undefined) s.settings.timePreference = '顺其自然';
   if (!s.settings.narrativePace) s.settings.narrativePace = '常规';
   if (!s.settings.mode) s.settings.mode = 'novel';
+  if (!s.settings.pvpMode) s.settings.pvpMode = 'dramatic';
   if (s.settings.developerMode === undefined) s.settings.developerMode = false;
   if (s.settings.showResolutionEcho === undefined) s.settings.showResolutionEcho = true;
   return s;
@@ -560,15 +575,19 @@ Story.CharacterGenesis.publicEcho = function (plate) {
  * §4 角色建立
  * ============================================================ */
 
-Story.createActor = function (setup, storyState) {
+/**
+ * V3.4.1 两阶段角色建立的第一阶段。
+ * 此时不读取 state.actors，否则先创建的角色永远看不到后来的同伴。
+ */
+Story.createActorWithoutRelations = function (storyState, setup) {
   setup = setup || {};
   const id = setup.id || ('actor_' + Math.floor(Story.rngFor('event', storyState).next() * 1e6).toString(36));
-  const relations = Story.Delta._buildRelationMap({ startingRelation: setup.startingRelation || setup.relationHints, id: id }, (storyState && storyState.actors) || []);
   const sceneLoc = (storyState && storyState.story && storyState.story.currentScene && storyState.story.currentScene.locationId) || null;
   const actor = {
     id: id,
     seatId: setup.seatId || null,
     controller: setup.controller || null,
+    displayName: setup.displayName || setup.roomDisplayName || setup.name || '',
     name: setup.name || '无名',
     identity: setup.identity || '',
     daoPath: setup.daoPath || '剑修',
@@ -579,7 +598,7 @@ Story.createActor = function (setup, storyState) {
     hiddenFate: setup.hiddenFate || '',
     goals: setup.goals || [],
     relationHints: setup.startingRelation || setup.relationHints || {},
-    relationships: relations,
+    relationships: {},
     agentArc: setup.agentArc || { currentGoal: setup.publicWish || '', stage: 0, pressure: 0, milestones: [], lastChoiceFingerprints: [], lastLocationId: '', lastFocusedChapter: 0 },
     statusSummary: '初入此界。',
     privateFacts: [],
@@ -590,11 +609,22 @@ Story.createActor = function (setup, storyState) {
     presence: setup.presence || 'present',   // 'present' | 'away'
     // V3.3 Phase 4：角色命盘
     fatePlate: setup.fatePlate || null,
+    behaviorState: setup.behaviorState || {
+      lastActionFingerprint: '', consecutiveSameAction: 0,
+      repeatedCategoryCount: {}, lastTargetId: '', repeatedTargetCount: 0,
+    },
   };
   // 命盘：若未提供且世界 bible 已就绪，则按种子确定性生成（独立 RNG 流）
   if (!actor.fatePlate && storyState && storyState.world && storyState.world.worldBible && storyState.world.seed) {
     actor.fatePlate = Story.CharacterGenesis.rollFatePlate(storyState.world.seed, actor, storyState.world.worldBible);
   }
+  return actor;
+};
+
+/** 单角色旧 API 保持兼容；会话创建必须使用两阶段流程。 */
+Story.createActor = function (setup, storyState) {
+  const actor = Story.createActorWithoutRelations(storyState, setup);
+  actor.relationships = Story.Delta._buildRelationMap(actor, (storyState && storyState.actors) || []);
   return actor;
 };
 
@@ -626,12 +656,16 @@ Story.createSession = async function (config) {
   Story._bindStateRng(state, Story.createRng(seed, 'story'));
 
   state.actors = (config.actors || []).map(function (setup, i) {
-    var a = Story.createActor(setup, state);
+    var a = Story.createActorWithoutRelations(state, setup);
     if (!a.seatId) a.seatId = setup.seatId || ('seat_' + i);
     return a;
   });
+  state.actors.forEach(function (actor) {
+    actor.relationships = Story.Delta._buildRelationMap(actor, state.actors);
+  });
 
   if (config.narrativePace) state.settings.narrativePace = config.narrativePace;
+  if (config.pvpMode) state.settings.pvpMode = config.pvpMode;
 
   // V3.3.2：若指定 skipOpening，跳过开局生成（等待 Director 投票后激活）
   if (!config.skipOpening) {
@@ -641,8 +675,8 @@ Story.createSession = async function (config) {
 };
 
 Story.startGame = async function (seed, playerSetup) {
-  const player = Object.assign({}, playerSetup, { id: 'lu', seatId: 'seat_0' });
-  const companions = Story.PRESET_COMPANIONS.map(function (tpl, i) { const c = Story._clone(tpl); c.seatId = 'seat_' + (i + 1); return c; });
+  const player = Object.assign({}, playerSetup, { id: 'lu', seatId: 'seat_0', controller: 'human' });
+  const companions = Story.PRESET_COMPANIONS.map(function (tpl, i) { const c = Story._clone(tpl); c.seatId = 'seat_' + (i + 1); c.controller = 'bot'; return c; });
   return Story.createSession({ seed: seed, actors: [player].concat(companions) });
 };
 
@@ -756,6 +790,8 @@ Story._commitPendingResolution = function (state, narration, isOpening) {
   // 4. 叙事
   const chapter = Story.Narration.assembleFromAI(state, s.currentScene, envelope, narration);
   Story.Narration.applyNarration(state, chapter, envelope, !!isOpening);
+  // 只在章节成功提交后更新；AI 失败时不影响下轮重复行为判定。
+  Story.Behavior.commitFromEnvelope(state, envelope);
   // 5. 编年史
   Story.appendChronicle(state, s.currentChapter.chapterSummary);
   // 6. 写入 TurnRecord
@@ -872,8 +908,9 @@ Story.abortResolution = function (storyState) {
  *   AI 失败：停在 awaiting_narration，世界状态零变化，由 retryNarration 复用 pendingResolution 重试。
  *   resolving 异常：调 abortResolution 回 collecting，保留 actionsByActorId + botActions，玩家可重试结算。
  */
-Story.resolveTurn = async function (storyState, actionsByActorId) {
+Story.resolveTurn = async function (storyState, actionsByActorId, options) {
   if (!storyState || !storyState.story.currentChapter) throw new Error('尚未开局');
+  options = options || {};
   Story._activateState(storyState);
   actionsByActorId = actionsByActorId || {};
   const state = storyState;
@@ -934,6 +971,15 @@ Story.resolveTurn = async function (storyState, actionsByActorId) {
     if (state.settings && state.settings.developerMode) console.error('Director.evaluate 失败：', e.message);
   }
 
+  // 只读场景预演：供叙事事实契约使用，真实状态仍在章节成功后提交。
+  var sceneAfterPreview = sceneBefore;
+  try {
+    var previewState = Story._clone(state);
+    sceneAfterPreview = Story.Scene.composeNext(previewState, envelope);
+  } catch (previewError) {
+    sceneAfterPreview = sceneBefore;
+  }
+
   // 6. awaiting_narration：世界状态冻结，存 pendingResolution
   Story._setTurnPhase(state, 'awaiting_narration');
   const turnId = 'turn_' + String(chapterIndexBefore + 1).padStart(4, '0');
@@ -948,7 +994,11 @@ Story.resolveTurn = async function (storyState, actionsByActorId) {
     retryCount: 0,
     lastNarrationError: null,
     directorPlan: directorPlan,
+    sceneAfterPreview: sceneAfterPreview,
   };
+
+  // 服务端持久化边界：行动已锁定且 pendingResolution 已建立，但尚未发起 AI 请求。
+  if (typeof options.beforeNarration === 'function') await options.beforeNarration(state.story.pendingResolution);
 
   // 6. 调 AI 叙事
   const brief = Story.Narration.buildBrief(state, s.currentScene, envelope);
@@ -1111,6 +1161,17 @@ Story._tagMatches = function (tag, text) {
 
 Story.Intent = Story.Intent || {};
 
+// V3.4.1：旧存档和场景配方曾同时使用两套实体 ID。
+Story.EntityAliases = Object.assign({
+  innkeeper_01: 'ent_innkeeper',
+  trade_letter: 'ent_trade_letter',
+  residual_sword: 'ent_residual_sword',
+}, Story.EntityAliases || {});
+
+Story.canonicalEntityId = function (id) {
+  return Story.EntityAliases[id] || id;
+};
+
 Story.Intent.CATEGORIES = ['rest','wait','observe','investigate','travel','social','negotiate','cultivate','craft','battle','flee','steal','aid','deceive','use_relic','freeform'];
 
 Story.Intent.KEYWORDS = {
@@ -1160,6 +1221,9 @@ Story.Intent.fromChoice = function (state, actorId, choiceId) {
 Story.Intent._fromChoice = function (state, actorId, c) {
   const text = (c.label || '') + ' ' + (c.hint || '');
   const parsed = Story.Intent._classify(text);
+  const resolvedTarget = Story.Intent.resolveTarget(state, actorId, text, c.intentCategory || parsed.category);
+  const explicitId = c.targetId ? Story.canonicalEntityId(c.targetId) : null;
+  const explicitTarget = explicitId ? Story.Intent._findTargetById(state, explicitId) : null;
   return {
     actorId: actorId,
     source: 'choice',
@@ -1167,8 +1231,10 @@ Story.Intent._fromChoice = function (state, actorId, c) {
     rawText: c.label || '',
     category: c.intentCategory || parsed.category,
     approach: c.approach || parsed.approach,
-    targetType: c.targetType || parsed.targetType,
-    targetId: c.targetId || parsed.targetId,
+    targetType: c.targetType || (explicitTarget && explicitTarget.type) || resolvedTarget.type,
+    targetId: explicitId || resolvedTarget.id,
+    targetName: (explicitTarget && explicitTarget.name) || resolvedTarget.name,
+    targetConfidence: c.targetId ? 1 : resolvedTarget.confidence,
     timePreference: c.timeHint || parsed.timePreference,
     riskStyle: c.riskLevel >= 3 ? 'aggressive' : 'normal',
     derivedTags: (c.tags && c.tags.length) ? c.tags : parsed.derivedTags,
@@ -1182,6 +1248,7 @@ Story.Intent._fromChoice = function (state, actorId, c) {
 Story.Intent.parseCustomText = function (state, actorId, text, timePreference) {
   const t = String(text || '').trim();
   const parsed = Story.Intent._classify(t);
+  const target = Story.Intent.resolveTarget(state, actorId, t, parsed.category);
   return {
     actorId: actorId,
     source: 'custom',
@@ -1189,8 +1256,10 @@ Story.Intent.parseCustomText = function (state, actorId, text, timePreference) {
     rawText: t,
     category: parsed.category,
     approach: parsed.approach,
-    targetType: parsed.targetType,
-    targetId: parsed.targetId,
+    targetType: target.type,
+    targetId: target.id,
+    targetName: target.name,
+    targetConfidence: target.confidence,
     timePreference: timePreference || parsed.timePreference,
     riskStyle: parsed.riskStyle,
     derivedTags: parsed.derivedTags,
@@ -1214,11 +1283,123 @@ Story.Intent._build = function (actorId, source, choiceId, rawText, category, st
   return Object.assign({
     actorId: actorId, source: source, choiceId: choiceId, rawText: rawText,
     category: category, approach: extra.approach || 'normal', targetType: extra.targetType || 'self',
-    targetId: extra.targetId || actorId, timePreference: extra.timePreference || Story.Intent.DEFAULT_TIME[category],
+    targetId: extra.targetId || actorId, targetName: extra.targetName || '', targetConfidence: extra.targetConfidence || 0.8,
+    timePreference: extra.timePreference || Story.Intent.DEFAULT_TIME[category],
     riskStyle: extra.riskStyle || 'normal', derivedTags: extra.derivedTags || [category],
     confidence: extra.confidence || 0.8, parseNotes: extra.parseNotes || [],
     nextIntentHint: extra.nextIntentHint || null, restSurface: extra.restSurface || false,
   }, {});
+};
+
+Story.Intent._entityTargetType = function (entity, fallback) {
+  const kind = entity && entity.kind;
+  if (kind === 'npc' || kind === 'relic' || kind === 'clue' || kind === 'exit') return kind;
+  if (kind === 'array') return 'clue';
+  return fallback || 'clue';
+};
+
+Story.Intent._findTargetById = function (state, id) {
+  if (!state || !id) return null;
+  const canonicalId = Story.canonicalEntityId(id);
+  const actor = (state.actors || []).find(function (a) { return a.id === canonicalId; });
+  if (actor) return { type: 'actor', id: actor.id, name: actor.name, confidence: 1, matchedText: actor.name };
+  const scene = state.story && state.story.currentScene || {};
+  const groups = [scene.visibleEntities, scene.exits, scene.availableAssets];
+  for (let g = 0; g < groups.length; g++) {
+    const found = Story.Scene.Entity.normalize(groups[g]).find(function (e) {
+      return Story.canonicalEntityId(e.id) === canonicalId;
+    });
+    if (found) return {
+      type: Story.Intent._entityTargetType(found, g === 1 ? 'exit' : 'clue'),
+      id: Story.canonicalEntityId(found.id), name: found.name, confidence: 1, matchedText: found.name,
+    };
+  }
+  const asset = (state.assets || []).find(function (a) { return Story.canonicalEntityId(a.id) === canonicalId; });
+  if (asset) return { type: Story.Intent._entityTargetType(asset, 'relic'), id: canonicalId, name: asset.name, confidence: 1, matchedText: asset.name };
+  const thread = (state.story && state.story.activeThreads || []).find(function (t) { return t.threadId === canonicalId; });
+  if (thread) return { type: 'thread', id: thread.threadId, name: thread.title || thread.summary || thread.threadId, confidence: 1, matchedText: thread.title || '' };
+  return null;
+};
+
+/** 统一动态目标解析器：仅返回本地状态中可证明存在的目标。 */
+Story.Intent.resolveTarget = function (state, actorId, text, category) {
+  const t = String(text || '');
+  const actors = (state && state.actors || []).slice().sort(function (a, b) {
+    const ai = parseInt(String(a.seatId || '').replace(/\D/g, ''), 10);
+    const bi = parseInt(String(b.seatId || '').replace(/\D/g, ''), 10);
+    return (isNaN(ai) ? 999 : ai) - (isNaN(bi) ? 999 : bi);
+  });
+  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+  // 1. 玩家A / 玩家1，按席位顺序稳定映射。
+  for (let i = 0; i < actors.length; i++) {
+    const aliases = ['玩家' + letters.charAt(i), '玩家' + (i + 1)];
+    for (let j = 0; j < aliases.length; j++) {
+      if (t.indexOf(aliases[j]) >= 0) return { type: 'actor', id: actors[i].id, name: actors[i].name, confidence: 1, matchedText: aliases[j] };
+    }
+  }
+
+  function longestNamedMatch(items, nameOf) {
+    return (items || []).map(function (item) { return { item: item, name: String(nameOf(item) || '').trim() }; })
+      .filter(function (x) { return x.name && t.indexOf(x.name) >= 0; })
+      .sort(function (a, b) { return b.name.length - a.name.length; })[0] || null;
+  }
+
+  // 2-3. 房间显示名优先于角色真实姓名。
+  let hit = longestNamedMatch(actors, function (a) { return a.displayName; });
+  if (hit) return { type: 'actor', id: hit.item.id, name: hit.item.name, confidence: 1, matchedText: hit.name };
+  hit = longestNamedMatch(actors, function (a) { return a.name; });
+  if (hit) return { type: 'actor', id: hit.item.id, name: hit.item.name, confidence: 1, matchedText: hit.name };
+
+  const scene = state && state.story && state.story.currentScene || {};
+  function fromEntities(entries, fallbackType, confidence) {
+    const normalized = Story.Scene.Entity.normalize(entries);
+    const match = longestNamedMatch(normalized, function (e) { return e.name; });
+    if (!match) return null;
+    return {
+      type: Story.Intent._entityTargetType(match.item, fallbackType),
+      id: Story.canonicalEntityId(match.item.id), name: match.item.name,
+      confidence: confidence, matchedText: match.name,
+    };
+  }
+
+  // 4-6. 当前场景实体、出口、可用资产。
+  let entityHit = fromEntities(scene.visibleEntities, 'clue', 0.98);
+  if (entityHit) return entityHit;
+  entityHit = fromEntities(scene.exits, 'exit', 0.97);
+  if (entityHit) return entityHit;
+  entityHit = fromEntities(scene.availableAssets, 'relic', 0.96);
+  if (entityHit) return entityHit;
+  entityHit = fromEntities((state && state.assets || []).filter(function (a) {
+    return !a.locationId || !scene.locationId || a.locationId === scene.locationId || a.ownerActorId === actorId;
+  }), 'relic', 0.94);
+  if (entityHit) return entityHit;
+
+  // 7. 私密或 dormant 线索不进入公开目标索引。
+  const threads = (state && state.story && state.story.activeThreads || []).filter(function (thread) {
+    return thread.status === 'active' && thread.visibility === 'public';
+  });
+  hit = longestNamedMatch(threads, function (thread) { return thread.title || thread.summary; });
+  if (hit) return { type: 'thread', id: hit.item.threadId, name: hit.item.title || hit.item.summary, confidence: 0.93, matchedText: hit.name };
+
+  // 8. 旧通用词 fallback，在返回前统一 ID。
+  const legacy = Story.Intent._inferTarget(t, category);
+  const legacyId = Story.canonicalEntityId(legacy.id);
+  const knownLegacy = Story.Intent._findTargetById(state, legacyId);
+  if (knownLegacy) {
+    knownLegacy.confidence = 0.88;
+    knownLegacy.matchedText = legacy.matchedText || knownLegacy.matchedText;
+    return knownLegacy;
+  }
+  if (legacy.type !== 'self' && legacy.id !== 'scene_anomaly' && legacy.id !== 'nearest_exit') {
+    return { type: legacy.type === 'array' ? 'clue' : legacy.type, id: legacyId, name: legacy.name || legacy.matchedText || legacyId, confidence: 0.72, matchedText: legacy.matchedText || '' };
+  }
+
+  // 9. 语义安全默认值。
+  if (category === 'flee' || category === 'travel') return { type: 'exit', id: 'nearest_exit', name: '最近出口', confidence: 0.35, matchedText: '' };
+  if (category === 'investigate' || category === 'observe') return { type: 'clue', id: 'scene_anomaly', name: '场景异常', confidence: 0.35, matchedText: '' };
+  const self = actors.find(function (a) { return a.id === actorId; });
+  return { type: 'self', id: actorId || 'self', name: self ? self.name : '自身', confidence: 0.3, matchedText: '' };
 };
 
 /** 核心：文本 → {category, approach, targetType, targetId, timePreference, derivedTags, ...} */
@@ -1305,10 +1486,10 @@ Story.Intent._inferApproach = function (t, category) {
 Story.Intent._inferTarget = function (t, category) {
   // NPC
   const npcMap = { '掌柜': 'innkeeper_01', '女掌柜': 'innkeeper_01', '韩照野': 'han', '沈青萝': 'shen', '顾长风': 'gu', '商队': 'trade_caravan', '商会': 'trade_caravan', '妖王': 'demon_lord' };
-  for (const k in npcMap) { if (t.indexOf(k) >= 0) return { type: 'npc', id: npcMap[k] }; }
-  if (/密信|信/.test(t)) return { type: 'clue', id: 'trade_letter' };
-  if (/残剑|剑/.test(t)) return { type: 'relic', id: 'residual_sword' };
-  if (/阵|阵纹|阵眼/.test(t)) return { type: 'array', id: 'gu_old_array' };
+  for (const k in npcMap) { if (t.indexOf(k) >= 0) return { type: 'npc', id: Story.canonicalEntityId(npcMap[k]), name: k, matchedText: k }; }
+  if (/密信|信/.test(t)) return { type: 'clue', id: 'ent_trade_letter', name: '密信', matchedText: '密信' };
+  if (/残剑|剑/.test(t)) return { type: 'relic', id: 'ent_residual_sword', name: '残剑', matchedText: '残剑' };
+  if (/阵|阵纹|阵眼/.test(t)) return { type: 'array', id: 'gu_old_array', name: '阵纹', matchedText: '阵' };
   if (category === 'rest' || category === 'cultivate' || category === 'wait') return { type: 'self', id: 'self' };
   if (category === 'flee') return { type: 'exit', id: 'nearest_exit' };
   if (category === 'investigate') return { type: 'clue', id: 'scene_anomaly' };
@@ -1341,7 +1522,7 @@ Story.Scene.Entity = {
     return arr.map(function (e, i) {
       if (e && typeof e === 'object') {
         return {
-          id: e.id || ('ent_' + i),
+          id: Story.canonicalEntityId(e.id || ('ent_' + i)),
           name: e.name || e.id || ('事物' + i),
           kind: e.kind || 'prop',
           affordances: Array.isArray(e.affordances) ? e.affordances.slice() : [],
@@ -1349,6 +1530,7 @@ Story.Scene.Entity = {
           threadId: e.threadId || '',
           sourceThreadId: e.sourceThreadId || '',
           sourceArcId: e.sourceArcId || '',
+          destination: e.destination ? Story._clone(e.destination) : null,
         };
       }
       const name = String(e);
@@ -3001,9 +3183,9 @@ Story.Scene.createOpeningScene = function (state) {
       { id: 'asset_residual_sword', name: '残剑', kind: 'relic', affordances: ['use_relic'] },
     ],
     exits: [
-      { id: 'exit_gate', name: '城门', kind: 'exit', affordances: ['travel', 'flee'] },
-      { id: 'exit_backyard', name: '客栈后院', kind: 'exit', affordances: ['travel', 'observe'] },
-      { id: 'exit_guild', name: '商会旧址', kind: 'exit', affordances: ['travel', 'investigate'] },
+      { id: 'exit_gate', name: '城门', kind: 'exit', affordances: ['travel', 'flee'], destination: { locationId: 'redsand_city_gate', locationName: '赤砂边城·城门', templateId: 'city_gate' } },
+      { id: 'exit_backyard', name: '客栈后院', kind: 'exit', affordances: ['travel', 'observe'], destination: { locationId: 'inn_redsand_backyard', locationName: '听雨客栈·后院', templateId: 'inn_backyard' } },
+      { id: 'exit_guild', name: '商会旧址', kind: 'exit', affordances: ['travel', 'investigate'], destination: { locationId: 'redsand_guild_ruin', locationName: '赤砂商会旧址', templateId: 'guild_ruin' } },
     ],
     activeThreadIds: ['thread_trade_letter', 'thread_old_sword'],
     pressure: 1,
@@ -3057,6 +3239,27 @@ Story.Scene.createOpeningThreads = function (state) {
   ];
 };
 
+Story.SceneTransition = Story.SceneTransition || {};
+
+Story.SceneTransition.resolveDestination = function (state, action, exitEntity) {
+  const scene = state && state.story && state.story.currentScene || {};
+  if (action && action.targetId === 'rejoin_party') {
+    return { locationId: scene.locationId, locationName: scene.locationName, templateId: scene.templateId || 'existing_scene' };
+  }
+  const exit = exitEntity || Story.Scene.Entity.normalize(scene.exits).find(function (candidate) {
+    return action && candidate.id === action.targetId;
+  });
+  if (exit && exit.destination) {
+    return Object.assign({ locationId: exit.id.replace(/^exit_/, 'location_'), locationName: exit.name, templateId: 'generic_destination' }, Story._clone(exit.destination));
+  }
+  if (exit) return { locationId: exit.id.replace(/^exit_/, 'location_'), locationName: exit.name, templateId: 'generic_destination' };
+  return {
+    locationId: action && action.targetId && action.targetId !== 'nearest_exit' ? action.targetId : ((scene.locationId || 'scene') + '_outside'),
+    locationName: action && action.targetName ? action.targetName : ((scene.locationName || '此地') + '·外'),
+    templateId: 'generic_destination',
+  };
+};
+
 /** 是否应切换场景（V3.3 Phase 2 共享场景版）。
  *  travel/flee 不再无条件重写全员位置：
  *    - 玩家(主人类角色)移动，或半数以上活跃角色同时移动 → 'move'（整队迁移，重写共享场景）
@@ -3066,19 +3269,23 @@ Story.Scene.shouldTransition = function (state, envelope) {
   const actions = envelope.actions || [];
   const movers = actions.filter(function (a) { return a.category === 'travel' || a.category === 'flee'; });
   if (movers.length > 0) {
-    const player = Story.getPrimaryHumanActor(state);
-    const playerMoves = player && movers.some(function (m) { return m.actorId === player.id; });
-    const active = (state.actors || []).filter(function (a) { return a.presence !== 'away'; });
-    const majority = active.length > 0 && (movers.length * 2 > active.length);
-    // 单人/独游：默认整队迁移（保留 V3.2 行为，避免破坏单人体验）
-    const solo = active.length <= 1;
-    if (playerMoves || majority || solo) return 'move';
+    const activeHumans = (state.actors || []).filter(function (actor) { return Story._isHumanActor(state, actor) && actor.presence !== 'away'; });
+    const humanMovers = movers.filter(function (move) { return activeHumans.some(function (actor) { return actor.id === move.actorId; }); });
+    const counts = {};
+    humanMovers.forEach(function (move) { counts[move.targetId] = (counts[move.targetId] || 0) + 1; });
+    const targets = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; });
+    const winner = targets[0] || '';
+    const winnerCount = winner ? counts[winner] : 0;
+    envelope.movementDecision = { targetId: winner, votes: winnerCount, humanCount: activeHumans.length, conflictingTargets: targets, unanimous: activeHumans.length > 0 && winnerCount === activeHumans.length };
+    // 没有“第一真人”特权；只有全体/过半数真人选择同一出口才整队迁移。
+    if (activeHumans.length === 1 && winnerCount === 1) return 'move';
+    if (activeHumans.length > 1 && winnerCount * 2 > activeHumans.length) return 'move';
     return 'partial_move';
   }
   if (envelope.worldDelta && envelope.worldDelta.epochJump) return 'epoch_jump';
   // 时间跨度极大
-  const tp = envelope.actions[0] && envelope.actions[0].timePassed;
-  if (tp && (tp.unit === '百年' || tp.unit === '数年')) return 'skip_time';
+  const tp = envelope.elapsedTime;
+  if (tp && Story.Time.toDays(tp) >= 365) return 'skip_time';
   // 场景 deadline 归零且 thread 关闭 → close
   const scene = state.story.currentScene;
   if (scene && scene.deadline && scene.deadline.remaining <= 0 && (scene.sceneStatus === 'closing')) return 'close';
@@ -3094,23 +3301,30 @@ Story.Scene.composeNext = function (state, envelope) {
   next.lastUpdatedAtChapter = idx;
 
   if (transition === 'move') {
-    const moveAct = (envelope.actions || []).find(function (a) { return a.category === 'travel' || a.category === 'flee'; });
-    next.locationId = (moveAct && moveAct.targetId === 'trade_caravan') ? 'road_broken_flow' : (moveAct ? 'road_broken_flow' : 'inn_redsand');
-    next.locationName = (moveAct && moveAct.targetId === 'trade_caravan') ? '断流古道·车辙' : (next.locationName + '·外');
-    next.immediateConflict = moveAct && moveAct.category === 'flee' ? '追兵仍在身后，未肯罢休。' : '古道车辙在雨中被两种脚印覆盖。';
-    next.immediateQuestion = moveAct && moveAct.category === 'flee' ? '如何甩脱追踪？' : '是否沿车辙继续追查？';
-    // V3.3 Phase 3：对象化出口/实体
-    next.exits = [
-      { id: 'exit_back', name: '来路', kind: 'exit', affordances: ['travel', 'flee'] },
-      { id: 'exit_deep', name: '古道深处', kind: 'exit', affordances: ['travel', 'investigate'] },
-      { id: 'exit_path', name: '林间小径', kind: 'exit', affordances: ['travel', 'flee'] },
-    ];
-    next.visibleEntities = [
-      { id: 'ent_rut', name: '车辙', kind: 'clue', affordances: ['investigate', 'observe'] },
-      { id: 'ent_rain', name: '雨', kind: 'prop', affordances: ['observe'] },
-      { id: 'ent_residual_sword', name: '残剑', kind: 'relic', affordances: ['use_relic', 'investigate'] },
-    ];
-    next.availableAssets = [{ id: 'asset_residual_sword', name: '残剑', kind: 'relic', affordances: ['use_relic'] }];
+    const chosenTargetId = envelope.movementDecision && envelope.movementDecision.targetId;
+    const moveAct = (envelope.actions || []).find(function (action) {
+      return (action.category === 'travel' || action.category === 'flee') && (!chosenTargetId || action.targetId === chosenTargetId);
+    });
+    const exitEntity = Story.Scene.Entity.normalize(prev.exits).find(function (exit) { return moveAct && exit.id === moveAct.targetId; });
+    const destination = Story.SceneTransition.resolveDestination(state, moveAct, exitEntity);
+    next.sceneId = 'scene_' + String(idx).padStart(4, '0') + '_' + String(destination.locationId || 'destination').replace(/[^A-Za-z0-9_\-]/g, '_');
+    next.locationId = destination.locationId;
+    next.locationName = destination.locationName;
+    next.templateId = destination.templateId || 'generic_destination';
+    next.immediateConflict = destination.immediateConflict || (moveAct && moveAct.category === 'flee' ? '原有威胁仍可能继续追踪。' : '抵达新地点后，眼前局势尚待确认。');
+    next.immediateQuestion = destination.immediateQuestion || (moveAct && moveAct.category === 'flee' ? '如何安全脱离威胁？' : '下一步要在此处做什么？');
+    next.exits = Story.Scene.Entity.normalize(destination.exits || [{
+      id: 'exit_back_' + String(prev.locationId || 'previous'), name: '返回' + (prev.locationName || '来处'), kind: 'exit', affordances: ['travel', 'flee'],
+      destination: { locationId: prev.locationId, locationName: prev.locationName, templateId: prev.templateId || 'existing_scene' },
+    }]);
+    next.visibleEntities = Story.Scene.Entity.normalize(destination.visibleEntities && destination.visibleEntities.length ? destination.visibleEntities : [{
+      id: 'ent_landmark_' + String(destination.locationId || 'destination'),
+      name: (destination.locationName || '新地点') + '的环境标志',
+      kind: 'prop', affordances: ['observe', 'investigate'],
+    }]);
+    next.availableAssets = Story.Scene.Entity.normalize(destination.availableAssets || Story.AssetRegistry.byLocation(state, destination.locationId).map(function (asset) {
+      return { id: asset.id, name: asset.name, kind: asset.kind, affordances: asset.kind === 'relic' ? ['use_relic', 'investigate'] : ['investigate'] };
+    }));
     next.enteredAtChapter = idx;
     next.deadline = null;
     next.pressure = Math.max(2, prev.pressure);
@@ -3127,7 +3341,8 @@ Story.Scene.composeNext = function (state, envelope) {
         a.locationId = next.locationId;
       } else {
         a.presence = 'away';
-        a.locationId = (m.targetId === 'trade_caravan') ? 'road_broken_flow' : (m.targetId || 'road_broken_flow');
+        const moverExit = Story.Scene.Entity.normalize(prev.exits).find(function (exit) { return exit.id === m.targetId; });
+        a.locationId = Story.SceneTransition.resolveDestination(state, m, moverExit).locationId;
       }
     });
     next.pressure = Math.min(5, Math.max(1, prev.pressure));
@@ -3160,6 +3375,7 @@ Story.Scene.composeNext = function (state, envelope) {
   // 焦点角色
   next.focalActorIds = Story.Scene.pickFocalActors(state, envelope);
   next.sceneStatus = transition === 'close' ? 'closed' : 'open';
+  Story.Time.advanceSceneClock(next, envelope.elapsedTime);
   return next;
 };
 
@@ -3186,14 +3402,115 @@ Story.Scene.pickFocalActors = function (state, envelope) {
  * §10 TurnResolver —— 本地回合裁决器（V3.2 §I）
  * ============================================================ */
 
+Story.Time = Story.Time || {};
+
+Story.Time.toDays = function (timePassed) {
+  if (!timePassed) return 0;
+  if (typeof timePassed === 'number') return timePassed * 365;
+  const value = Number(timePassed.value) || 0;
+  const unit = timePassed.unit;
+  if (unit === '百年') return value * 36500;
+  if (unit === '年') return value * 365;
+  if (unit === '月') return value * 30;
+  if (unit === '日' || unit === '夜') return value;
+  if (unit === '片刻') return value / 24;
+  return 0;
+};
+
+Story.Time.maxOfActions = function (actions) {
+  let max = null;
+  (actions || []).forEach(function (action) {
+    const value = action && action.timePassed;
+    if (!value) return;
+    if (!max || Story.Time.toDays(value) > Story.Time.toDays(max)) max = value;
+  });
+  return max ? Story._clone(max) : { value: 1, unit: '片刻' };
+};
+
+Story.Time.isLong = function (timePassed) {
+  return Story.Time.toDays(timePassed) >= 30;
+};
+
+Story.Time.advanceSceneClock = function (scene, elapsedTime) {
+  if (!scene) return scene;
+  const days = Story.Time.toDays(elapsedTime);
+  scene.clockTicks = (scene.clockTicks || 0) + 1;
+  if (days >= 30) {
+    scene.timeOfDay = days >= 365 ? '数年之后' : '数月之后';
+    scene.weather = '换季';
+    return scene;
+  }
+  if (days >= 2) {
+    scene.timeOfDay = Math.max(1, Math.round(days)) + '日后·黄昏';
+    return scene;
+  }
+  if (days >= 1) {
+    scene.timeOfDay = /(夜|深夜)/.test(scene.timeOfDay || '') ? '清晨' : '翌日·清晨';
+    return scene;
+  }
+  const phases = ['清晨', '日上三竿', '午后', '黄昏', '夜', '深夜'];
+  let index = phases.indexOf(scene.timeOfDay);
+  if (index < 0) index = /(夜|雨)/.test(scene.timeOfDay || '') ? 4 : 0;
+  scene.timeOfDay = phases[(index + 1) % phases.length];
+  return scene;
+};
+
+Story.Behavior = Story.Behavior || {};
+
+Story.Behavior.fingerprint = function (action) {
+  if (!action) return '';
+  return [action.category || '', action.targetId || ''].join('|');
+};
+
+Story.Behavior.project = function (state, action) {
+  const actor = state && state.actors && state.actors.find(function (candidate) { return candidate.id === action.actorId; });
+  const behavior = actor && actor.behaviorState || {};
+  const fingerprint = Story.Behavior.fingerprint(action);
+  return {
+    fingerprint: fingerprint,
+    consecutiveSameAction: behavior.lastActionFingerprint === fingerprint ? (behavior.consecutiveSameAction || 0) + 1 : 1,
+    repeatedTargetCount: action.targetId && behavior.lastTargetId === action.targetId ? (behavior.repeatedTargetCount || 0) + 1 : (action.targetId ? 1 : 0),
+  };
+};
+
+Story.Behavior.commitFromEnvelope = function (state, envelope) {
+  (envelope && envelope.actions || []).forEach(function (action) {
+    const actor = state.actors.find(function (candidate) { return candidate.id === action.actorId; });
+    if (!actor) return;
+    const previous = actor.behaviorState || { lastActionFingerprint: '', consecutiveSameAction: 0, repeatedCategoryCount: {}, lastTargetId: '', repeatedTargetCount: 0 };
+    const projected = Story.Behavior.project(state, action);
+    previous.lastActionFingerprint = projected.fingerprint;
+    previous.consecutiveSameAction = projected.consecutiveSameAction;
+    previous.repeatedCategoryCount = previous.repeatedCategoryCount || {};
+    previous.repeatedCategoryCount[action.category] = (previous.repeatedCategoryCount[action.category] || 0) + 1;
+    previous.lastTargetId = action.targetId || '';
+    previous.repeatedTargetCount = projected.repeatedTargetCount;
+    actor.behaviorState = previous;
+  });
+};
+
 Story.Resolver = Story.Resolver || {};
 
-Story.Resolver.OUTCOMES = ['great_success','success','quiet_success','success_with_cost','partial_success','setback','missed_opportunity','interrupted','retreat','stalemate'];
+Story.Resolver.OUTCOMES = ['great_success','success','quiet_success','success_with_cost','partial_success','setback','missed_opportunity','interrupted','retreat','stalemate','long_action_request'];
 
 Story.Resolver.resolveTurn = function (state, intents) {
   const scene = state.story.currentScene;
   const chapterIndex = state.story.chapterIndex + 1;
   const turnId = 'turn_' + String(chapterIndex).padStart(4, '0');
+  const presentHumans = (state.actors || []).filter(function (actor) {
+    return Story._isHumanActor(state, actor) && actor.presence !== 'away';
+  });
+  const longHumanIds = intents.filter(function (intent) {
+    return Story.Time.isLong(Story.Resolver._timePassed(intent.timePreference));
+  }).map(function (intent) { return intent.actorId; });
+  const unanimousLongAction = presentHumans.length > 0 && presentHumans.every(function (actor) {
+    return longHumanIds.indexOf(actor.id) >= 0;
+  });
+  const sceneSafe = (!scene || (scene.pressure || 0) <= 1) && !(scene && scene.deadline && scene.deadline.remaining > 0);
+  intents.forEach(function (intent) {
+    const actor = state.actors.find(function (candidate) { return candidate.id === intent.actorId; });
+    intent.longActionApproved = !!(actor && actor.presence === 'away') || presentHumans.length <= 1 || (sceneSafe && unanimousLongAction);
+  });
   const actions = intents.map(function (intent) {
     return Story.Resolver.resolveActorAction(state, scene, intent);
   });
@@ -3324,7 +3641,10 @@ Story.Resolver.resolveActorAction = function (state, scene, intent) {
   const base = {
     actorId: intent.actorId,
     category: category,
+    targetType: intent.targetType,
     targetId: intent.targetId,
+    targetName: intent.targetName || '',
+    targetConfidence: intent.targetConfidence,
     rawText: intent.rawText,
     source: intent.source || 'custom',
     outcome: 'success',
@@ -3332,6 +3652,16 @@ Story.Resolver.resolveActorAction = function (state, scene, intent) {
     threadEffects: [], relationEffects: [],
     timePassed: Story.Resolver._timePassed(intent.timePreference),
   };
+
+  if (Story.Time.isLong(base.timePassed) && !intent.longActionApproved) {
+    base.outcome = 'long_action_request';
+    base.timePassed = { value: 1, unit: '片刻' };
+    base.gains = [];
+    base.costs = [{ type: 'consent_required', text: '长期行动需要安全场景与全部真人同意时间跳跃。' }];
+    base.publicEffects = [(actor ? actor.name : intent.actorId) + '提出长期行动，本回合仅登记请求，尚未开始。'];
+    base.interactionTags = ['long_action_request'];
+    return base;
+  }
 
   switch (category) {
     case 'rest':      return Story.Resolver._resolveRest(state, scene, intent, base, rng);
@@ -3371,12 +3701,20 @@ Story.Resolver._threadForIntent = function (state, scene, intent) {
 
 Story.Resolver._resolveRest = function (state, scene, intent, base, rng) {
   const actor = state.actors.find(function (a) { return a.id === intent.actorId; });
+  const repetition = Story.Behavior.project(state, base);
+  base.repetition = repetition;
   let outcome = 'quiet_success';
   const gains = [];
   // V3.3.1：不直接改写 actor.hidden，改为写入 actorStatusDeltas，由 Delta 统一提交
   base.actorStatusDeltas = base.actorStatusDeltas || [];
-  if (actor.hidden.injury > 0) { base.actorStatusDeltas.push({ key: 'injury', delta: -1 }); gains.push({ type: 'status', key: 'injury', delta: -1, text: '伤势略有恢复。' }); }
-  else { gains.push({ type: 'status', key: 'spirit', delta: 1, text: '神魂之痛稍有缓和。' }); }
+  const recoveryScale = repetition.consecutiveSameAction === 1 ? 1 : (repetition.consecutiveSameAction === 2 ? 0.5 : 0);
+  if (recoveryScale > 0 && actor.hidden.injury > 0) {
+    base.actorStatusDeltas.push({ key: 'injury', delta: -recoveryScale });
+    gains.push({ type: 'status', key: 'injury', delta: -recoveryScale, text: recoveryScale === 1 ? '伤势略有恢复。' : '连续休息的恢复效果减半。' });
+  } else if (recoveryScale > 0) {
+    base.actorStatusDeltas.push({ key: 'spirit', delta: recoveryScale });
+    gains.push({ type: 'status', key: 'spirit', delta: recoveryScale, text: recoveryScale === 1 ? '精神稍有恢复。' : '连续休息只恢复少量精神。' });
+  }
   base.gains = gains;
 
   const costs = [];
@@ -3400,6 +3738,19 @@ Story.Resolver._resolveRest = function (state, scene, intent, base, rng) {
       base.actorStatusDeltas.push({ key: 'injury', delta: +1 });
     }
   }
+  if (repetition.consecutiveSameAction >= 3 && outcome !== 'interrupted') {
+    outcome = 'missed_opportunity';
+    costs.push({ type: 'missed_opportunity', text: '连续休息已不再带来恢复，外界局势继续推进。' });
+    const repeatedPressureThreadId = Story.Resolver._threadForIntent(state, scene, intent);
+    if (repeatedPressureThreadId) base.threadEffects.push({ threadId: repeatedPressureThreadId, op: 'deadline_advance', delta: 1 });
+    base.publicEffects.push(actor.name + '因连续休息错过了行动窗口。');
+  }
+  if (repetition.consecutiveSameAction >= 4) {
+    base.interactionTags = (base.interactionTags || []).concat(['passive_avoidance']);
+    state.actors.filter(function (other) { return other.id !== actor.id; }).forEach(function (other) {
+      base.relationEffects.push({ actorId: other.id, targetId: actor.id, axis: 'suspicion', delta: 1, publicHint: '同伴对' + actor.name + '的消极回避心生疑虑。' });
+    });
+  }
   // 轮回紊乱 + 残剑 → 梦境线索（私密）
   const flags = state.world.worldBible.flags || {};
   if (flags.reincarnationChaos && (intent.derivedTags.indexOf('use_relic') >= 0 || (actor.hidden.resources.indexOf('残剑') >= 0) || /残剑/.test(intent.rawText))) {
@@ -3410,7 +3761,7 @@ Story.Resolver._resolveRest = function (state, scene, intent, base, rng) {
   }
   base.costs = costs;
   base.outcome = outcome;
-  base.publicEffects = base.publicEffects.concat([actor.name + '没有追出客栈。']);
+  if (!base.publicEffects.length) base.publicEffects.push(actor.name + '选择在' + ((scene && scene.locationName) || '此地') + '休息。');
   return base;
 };
 
@@ -3455,15 +3806,15 @@ Story.Resolver._resolveInvestigate = function (state, scene, intent, base, rng) 
 Story.Resolver._resolveSocial = function (state, scene, intent, base, rng) {
   const actor = state.actors.find(function (a) { return a.id === intent.actorId; });
   base.outcome = rng.chance(0.8) ? 'success' : 'success_with_cost';
-  const targetName = intent.targetType === 'npc' ? intent.targetId : '在场之人';
+  const targetName = intent.targetName || ((intent.targetType === 'npc' || intent.targetType === 'actor') ? intent.targetId : '在场之人');
   base.gains = [{ type: 'info', text: '与' + targetName + '有所交谈。' }];
   base.costs = [{ type: 'relation', text: '关系或立场可能因言辞改变。' }];
   // 关系变化
-  if (intent.targetType === 'npc' && intent.targetId === 'innkeeper_01') {
-    base.relationEffects.push({ actorId: intent.actorId, targetId: 'innkeeper_01', axis: 'trust', delta: 1, publicHint: '女掌柜似乎愿意多说几句。' });
+  if (intent.targetType === 'npc' && Story.canonicalEntityId(intent.targetId) === 'ent_innkeeper') {
+    base.relationEffects.push({ actorId: intent.actorId, targetId: 'ent_innkeeper', axis: 'trust', delta: 1, publicHint: '女掌柜似乎愿意多说几句。' });
     var socialThreadId = Story.Resolver._threadForIntent(state, scene, intent);
     if (socialThreadId) base.threadEffects.push({ threadId: socialThreadId, op: 'advance', delta: 1 });
-  } else if (intent.targetType === 'npc' && state.actors.some(function (a) { return a.id === intent.targetId; })) {
+  } else if (intent.targetType === 'actor' && state.actors.some(function (a) { return a.id === intent.targetId; })) {
     base.relationEffects.push({ actorId: intent.actorId, targetId: intent.targetId, axis: 'trust', delta: rng.chance(0.7) ? 1 : -1, publicHint: '两人之间的态度发生细微变化。' });
   }
   base.publicEffects = [actor.name + '与' + targetName + '交谈。'];
@@ -3504,12 +3855,67 @@ Story.Resolver._resolveCraft = function (state, scene, intent, base, rng) {
 
 Story.Resolver._resolveBattle = function (state, scene, intent, base, rng) {
   const actor = state.actors.find(function (a) { return a.id === intent.actorId; });
+  const targetActor = intent.targetType === 'actor'
+    ? state.actors.find(function (candidate) { return candidate.id === intent.targetId; })
+    : null;
+  const targetName = (targetActor && targetActor.name) || intent.targetName || intent.targetId || '未识别目标';
+  base.actorStatusDeltas = base.actorStatusDeltas || [];
+  base.targetStatusDeltas = base.targetStatusDeltas || [];
+  base.interactionTags = base.interactionTags || [];
+
+  if (targetActor && targetActor.id !== actor.id) {
+    const pvpMode = state.settings && state.settings.pvpMode || 'dramatic';
+    base.targetActorId = targetActor.id;
+    base.interactionTags.push('pvp', 'hostile');
+    if (pvpMode === 'off') {
+      base.outcome = 'stalemate';
+      base.gains = [];
+      base.costs = [{ type: 'pvp_disabled', text: '房间已禁止主动攻击其他玩家。' }];
+      base.publicEffects = [actor.name + '试图攻击' + targetActor.name + '，但被房间规则制止。'];
+      return base;
+    }
+
+    const roll = rng.next();
+    base.outcome = roll < 0.5 ? 'success' : (roll < 0.85 ? 'partial_success' : 'setback');
+    base.gains = [{ type: 'position', text: '对' + targetActor.name + '的攻击取得了具体战果。' }];
+    base.costs = [{ type: 'hostility', text: '双方敌意与戒备明显上升。' }];
+    const suspicion = base.outcome === 'success' ? 2 : 1;
+    base.relationEffects.push(
+      { actorId: actor.id, targetId: targetActor.id, axis: 'suspicion', delta: suspicion, publicHint: actor.name + '对' + targetActor.name + '显露敌意。' },
+      { actorId: targetActor.id, targetId: actor.id, axis: 'suspicion', delta: suspicion, publicHint: targetActor.name + '对' + actor.name + '提高戒备。' }
+    );
+    base.actorStatusDeltas.push({ key: 'hostility', delta: 1 });
+    base.targetStatusDeltas.push({ actorId: targetActor.id, key: 'alertness', delta: 2 });
+
+    if (base.outcome === 'success') {
+      base.targetStatusDeltas.push({ actorId: targetActor.id, key: 'injury', delta: pvpMode === 'full' ? 2 : 1 });
+      base.publicEffects = [actor.name + '攻击' + targetActor.name + '并成功命中，' + targetActor.name + '受伤。'];
+    } else if (base.outcome === 'partial_success') {
+      base.publicEffects = [actor.name + '攻击' + targetActor.name + '，攻势未完全命中，但已打断对方的节奏。'];
+    } else {
+      base.actorStatusDeltas.push({ key: pvpMode === 'full' ? 'injury' : 'spirit', delta: pvpMode === 'full' ? 1 : -1 });
+      base.publicEffects = [actor.name + '攻击' + targetActor.name + '失利，自身暴露并付出代价。'];
+    }
+
+    const repetition = Story.Behavior.project(state, base);
+    base.repetition = repetition;
+    if (repetition.repeatedTargetCount >= 2) {
+      base.interactionTags.push('escalating_pvp');
+      base.actorStatusDeltas.push({ key: 'hostility', delta: 1 });
+      base.publicEffects.push('这已是' + actor.name + '连续针对' + targetActor.name + '的第' + repetition.repeatedTargetCount + '次攻击，冲突正在升级。');
+    }
+    if (repetition.repeatedTargetCount >= 3 && base.outcome === 'success') {
+      base.targetStatusDeltas.push({ actorId: targetActor.id, key: 'hostility', delta: 1 });
+    }
+    return base;
+  }
+
+  // NPC/场景威胁/物体战斗仍须回显具体目标，不再用泛化“敌对威胁”替代。
   base.outcome = rng.chance(0.6) ? 'success' : 'success_with_cost';
-  base.gains = [{ type: 'threat_reduce', text: '暂时压低敌对威胁。' }];
+  base.gains = [{ type: 'threat_reduce', text: '暂时压制了' + targetName + '。' }];
   base.costs = [{ type: 'injury', text: '可能受伤或法力损耗。' }];
-  // V3.3.1：不直接改写 actor.hidden，改为写入 actorStatusDeltas
-  if (rng.chance(0.4)) { base.actorStatusDeltas = base.actorStatusDeltas || []; base.actorStatusDeltas.push({ key: 'injury', delta: +1 }); }
-  base.publicEffects = [actor.name + '正面交锋。'];
+  if (rng.chance(0.4)) base.actorStatusDeltas.push({ key: 'injury', delta: 1 });
+  base.publicEffects = [actor.name + '对' + targetName + '发起攻击。'];
   return base;
 };
 
@@ -3591,8 +3997,88 @@ Story.Resolver._resolveFreeform = function (state, scene, intent, base, rng) {
 };
 
 Story.Resolver.resolveInteractions = function (state, actionResults) {
-  // 简化：同回合同目标 social/aid → 关系强化
   const interactions = [];
+  let serial = 0;
+  const turnLabel = 'turn_' + String((state.story.chapterIndex || 0) + 1);
+  function nameOf(actorId) {
+    const actor = state.actors.find(function (candidate) { return candidate.id === actorId; });
+    return actor ? actor.name : actorId;
+  }
+  function add(type, actorIds, targetId, priority, effects, facts) {
+    serial++;
+    interactions.push({
+      interactionId: 'interaction_' + turnLabel + '_' + String(serial).padStart(3, '0'),
+      type: type, actorIds: actorIds, targetId: targetId || '', priority: priority,
+      effects: Object.assign({ overrideOutcomes: {}, actorStatusDeltas: [], relationEffects: [], publicFacts: [] }, effects || {}),
+      requiredNarrativeFacts: facts || [],
+    });
+  }
+
+  const battles = actionResults.filter(function (action) { return action.category === 'battle' && action.targetActorId; });
+  battles.forEach(function (battle) {
+    const targetAction = actionResults.find(function (candidate) { return candidate.actorId === battle.targetActorId; });
+    add('pvp_attack', [battle.actorId, battle.targetActorId], battle.targetActorId, 9, {}, [
+      nameOf(battle.actorId) + '攻击' + nameOf(battle.targetActorId),
+      '攻击结果为' + battle.outcome,
+    ]);
+
+    // 战斗在最高优先级打断目标休息，并撤销本轮恢复。
+    if (targetAction && targetAction.category === 'rest') {
+      targetAction.outcome = 'interrupted';
+      targetAction.gains = (targetAction.gains || []).filter(function (gain) { return gain.type !== 'status'; });
+      targetAction.actorStatusDeltas = (targetAction.actorStatusDeltas || []).filter(function (delta) { return !(delta.key === 'injury' && delta.delta < 0) && !(delta.key === 'spirit' && delta.delta > 0); });
+      targetAction.costs = (targetAction.costs || []).concat([{ type: 'interrupted', text: '被' + nameOf(battle.actorId) + '攻击，休息强制中断。' }]);
+      targetAction.publicEffects = (targetAction.publicEffects || []).concat([nameOf(battle.targetActorId) + '的休息被' + nameOf(battle.actorId) + '打断。']);
+      add('attack_sleeping_actor', [battle.actorId, battle.targetActorId], battle.targetActorId, 10, {
+        overrideOutcomes: { [battle.targetActorId]: 'interrupted' },
+      }, [nameOf(battle.actorId) + '攻击' + nameOf(battle.targetActorId), nameOf(battle.targetActorId) + '的休息被打断']);
+    }
+
+    actionResults.filter(function (action) {
+      return action.category === 'aid' && (action.targetId === battle.actorId || action.targetId === battle.targetActorId);
+    }).forEach(function (aid) {
+      const aidedId = aid.targetId;
+      add('combat_aid', [aid.actorId, aidedId, aidedId === battle.actorId ? battle.targetActorId : battle.actorId], aidedId, 8, {
+        relationEffects: [{ actorId: aidedId, targetId: aid.actorId, axis: 'trust', delta: 1, publicHint: nameOf(aidedId) + '记住了' + nameOf(aid.actorId) + '的援护。' }],
+      }, [nameOf(aid.actorId) + '在冲突中援护' + nameOf(aidedId)]);
+    });
+  });
+
+  const investigates = actionResults.filter(function (action) { return action.category === 'investigate'; });
+  investigates.forEach(function (investigate) {
+    actionResults.filter(function (action) { return action.category === 'aid' && action.targetId === investigate.targetId; }).forEach(function (aid) {
+      investigate.outcome = investigate.outcome === 'partial_success' ? 'success' : 'great_success';
+      investigate.gains.push({ type: 'clue', text: nameOf(aid.actorId) + '的协作使调查获得额外线索。' });
+      add('cooperative_investigation', [investigate.actorId, aid.actorId], investigate.targetId, 7, {
+        relationEffects: [{ actorId: investigate.actorId, targetId: aid.actorId, axis: 'trust', delta: 1, publicHint: '协作调查增进了双方信任。' }],
+      }, [nameOf(investigate.actorId) + '与' + nameOf(aid.actorId) + '协作调查' + (investigate.targetName || investigate.targetId)]);
+    });
+    actionResults.filter(function (action) { return action.category === 'battle' && action.targetId === investigate.targetId; }).forEach(function (battle) {
+      investigate.outcome = 'partial_success';
+      investigate.costs.push({ type: 'clue_damage', text: '针对同一目标的破坏行动损伤了部分线索。' });
+      add('investigate_destroy_conflict', [investigate.actorId, battle.actorId], investigate.targetId, 8, {}, [
+        nameOf(investigate.actorId) + '调查时，' + nameOf(battle.actorId) + '正在攻击同一目标', '部分线索受损',
+      ]);
+    });
+  });
+
+  actionResults.filter(function (action) { return action.category === 'social'; }).forEach(function (social) {
+    actionResults.filter(function (action) { return action.category === 'deceive' && action.targetId === social.targetId; }).forEach(function (deceive) {
+      add('social_deception', [social.actorId, deceive.actorId], social.targetId, 6, {
+        relationEffects: deceive.outcome === 'setback' ? [{ actorId: social.actorId, targetId: deceive.actorId, axis: 'suspicion', delta: 1, publicHint: '谎言使怀疑上升。' }] : [],
+      }, [nameOf(deceive.actorId) + '在交涉中尝试欺骗目标']);
+    });
+  });
+
+  const travels = actionResults.filter(function (action) { return action.category === 'travel' || action.category === 'flee'; });
+  if (travels.length > 1) {
+    const targets = Array.from(new Set(travels.map(function (action) { return action.targetId; })));
+    if (targets.length === 1) {
+      add('group_travel', travels.map(function (action) { return action.actorId; }), targets[0], 5, {}, [travels.map(function (action) { return nameOf(action.actorId); }).join('、') + '选择同行']);
+    } else {
+      add('travel_conflict', travels.map(function (action) { return action.actorId; }), '', 5, {}, ['队伍对移动目的地产生分歧']);
+    }
+  }
   return interactions;
 };
 
@@ -3636,24 +4122,29 @@ Story.Resolver.buildEnvelope = function (state, actions, interactions) {
     (a.actorStatusDeltas || []).forEach(function (sd) {
       publicDelta.push({ op: 'UPDATE_ACTOR_STATUS', target: { actorId: a.actorId }, payload: { key: sd.key, delta: sd.delta }, source: 'resolver', sourceTurnId: '' });
     });
+    // V3.4.1：PvP/交互可以对行动目标的状态产生延迟 Delta。
+    (a.targetStatusDeltas || []).forEach(function (sd) {
+      publicDelta.push({ op: 'UPDATE_ACTOR_STATUS', target: { actorId: sd.actorId || a.targetActorId || a.targetId }, payload: { key: sd.key, delta: sd.delta }, source: 'resolver', sourceTurnId: '' });
+    });
   });
 
-  // 时间推进：取本回合所有行动中跨度最大者（并行发生，取最长），作为 ADVANCE_TIME delta
-  const _yearsOf = function (tp) {
-    if (!tp || !tp.unit) return 0;
-    const v = Number(tp.value) || 0;
-    if (tp.unit === '年') return v;
-    if (tp.unit === '月') return v / 12;
-    if (tp.unit === '日') return v / 365;
-    if (tp.unit === '百年') return v * 100;
-    return 0; // 片刻/夜等不计年
-  };
-  let maxTp = null;
-  actions.forEach(function (a) {
-    if (!a || !a.timePassed) return;
-    if (!maxTp || _yearsOf(a.timePassed) > _yearsOf(maxTp)) maxTp = a.timePassed;
+  (interactions || []).forEach(function (interaction) {
+    const effects = interaction.effects || {};
+    (effects.actorStatusDeltas || []).forEach(function (sd) {
+      publicDelta.push({ op: 'UPDATE_ACTOR_STATUS', target: { actorId: sd.actorId }, payload: { key: sd.key, delta: sd.delta }, source: 'interaction', sourceTurnId: '' });
+    });
+    (effects.relationEffects || []).forEach(function (relation) {
+      publicDelta.push({ op: 'UPDATE_RELATION', target: { actorId: relation.actorId, relatedActorId: relation.targetId }, payload: { axis: relation.axis, delta: relation.delta, publicHint: relation.publicHint }, source: 'interaction', sourceTurnId: '' });
+    });
+    (effects.publicFacts || []).forEach(function (fact) {
+      publicDelta.push({ op: 'ADD_EVENT', payload: { type: 'interaction', text: typeof fact === 'string' ? fact : fact.text }, source: 'interaction', sourceTurnId: '' });
+    });
+    (interaction.requiredNarrativeFacts || []).forEach(function (fact) { narrationBeats.push(fact); });
   });
-  if (maxTp) publicDelta.push({ op: 'ADVANCE_TIME', payload: maxTp, source: 'resolver', sourceTurnId: '' });
+
+  // 时间唯一来源：后续 Scene/Narration/Director/Room 均读 envelope.elapsedTime。
+  const elapsedTime = Story.Time.maxOfActions(actions);
+  publicDelta.push({ op: 'ADVANCE_TIME', payload: elapsedTime, source: 'resolver', sourceTurnId: '' });
 
   return {
     turnId: '', chapterIndex: 0,
@@ -3662,6 +4153,7 @@ Story.Resolver.buildEnvelope = function (state, actions, interactions) {
     focalActorIds: [],
     actions: actions,
     interactions: interactions || [],
+    elapsedTime: elapsedTime,
     publicDelta: publicDelta,
     privateDelta: privateDelta,
     sceneDelta: sceneDelta,
@@ -3715,10 +4207,10 @@ Story.Delta.applyEnvelope = function (state, envelope) {
   (envelope.publicDelta || []).forEach(function (d) { Story.Delta._applyOne(state, d); });
   (envelope.privateDelta || []).forEach(function (d) { Story.Delta._applyOne(state, d); });
   // 时间推进已由 ADVANCE_TIME delta（buildEnvelope 注入）经 _applyOne 处理；
-  // 兜底：若 envelope 无 ADVANCE_TIME（如旧迁移数据），按 actions[0].timePassed 推进
+  // 兜底：旧迁移数据无 ADVANCE_TIME 时仍只读统一 elapsedTime。
   const hasAdvanceTime = (envelope.publicDelta || []).some(function (d) { return d && d.op === 'ADVANCE_TIME'; });
   if (!hasAdvanceTime) {
-    const tp = (envelope.actions && envelope.actions[0] && envelope.actions[0].timePassed) || { value: 1, unit: '片刻' };
+    const tp = envelope.elapsedTime || Story.Time.maxOfActions(envelope.actions);
     Story.applyTimePassed(state, tp);
   }
   // 关系描述同步到 relationHints（UI 用）
@@ -3806,6 +4298,7 @@ Story.Delta._applyOne = function (state, d) {
       if (key === 'injury') a2.hidden.injury = Math.max(0, Math.min(10, (a2.hidden.injury || 0) + (d.payload.delta || 0)));
       else if (key === 'cultivationProgress') a2.hidden.cultivationProgress = Math.min(99, (a2.hidden.cultivationProgress || 0) + (d.payload.delta || 0));
       else if (key === 'spirit') a2.hidden.spirit = Math.max(0, (a2.hidden.spirit || 0) + (d.payload.delta || 0));
+      else if (key === 'hostility' || key === 'alertness') a2.hidden[key] = Math.max(0, Math.min(10, (a2.hidden[key] || 0) + (d.payload.delta || 0)));
       break;
     }
     case 'UPDATE_CULTIVATION': {
@@ -4264,11 +4757,21 @@ Story.Narration.formatChapterNumber = function (n) {
 Story.Narration.buildFallbackTitle = function (state, scene, envelope) {
   const rng = Story.rngFor('narration', state);
   const idx = state.story.chapterIndex + 1;
+  const director = state.story.director || {};
+  const arc = director.activeArc || {};
+  const beat = (arc.beats || [])[arc.currentBeatIndex || 0] || {};
+  const primary = envelope && envelope.actions && envelope.actions[0] || {};
+  const actor = state.actors.find(function (candidate) { return candidate.id === primary.actorId; });
+  const target = primary.targetName || primary.targetId || '';
   const subjectPool = [
-    '雨声里的半封信', '城门外的车辙', '客栈未熄的灯', '雨停之前', '后院的新阵纹',
-    '钟声与剑鸣', '半句旧约', '雨幕下的人', '残剑的低语', '未结的局',
-    '灯下的药香', '离城之路', '旧阵一角', '梦中的名字', '追兵未远',
-  ];
+    beat.title,
+    arc.title,
+    scene && scene.locationName ? scene.locationName + '·' + Story.Narration._catLabel(primary.category) : '',
+    actor ? actor.name + '的' + Story.Narration._catLabel(primary.category) : '',
+    target ? target + '之后' : '',
+    primary.outcome ? Story.Narration._outcomeLabel(primary.outcome) + '之夜' : '',
+  ].filter(Boolean);
+  if (!subjectPool.length) subjectPool.push('此地新局');
   // 避免连续重复主题词
   const last = (state.story.recentChapterFingerprints || []).slice(-1)[0];
   let subject = rng.pick(subjectPool);
@@ -4277,10 +4780,279 @@ Story.Narration.buildFallbackTitle = function (state, scene, envelope) {
   return Story.Narration.formatChapterNumber(idx) + '：' + subject;
 };
 
+Story.Narration.buildCanonicalSummary = function (state, envelope, interactions, directorPlan, sceneAfter) {
+  const parts = [];
+  (envelope && envelope.actions || []).forEach(function (action) {
+    const actor = state.actors.find(function (candidate) { return candidate.id === action.actorId; });
+    const who = actor ? actor.name : action.actorId;
+    let sentence = who + Story.Narration._catLabel(action.category);
+    if (action.targetName && action.targetName !== who) sentence += '的目标是' + action.targetName;
+    sentence += '，结果为' + Story.Narration._outcomeLabel(action.outcome);
+    const gains = (action.gains || []).map(function (item) { return item.text; }).filter(Boolean);
+    const costs = (action.costs || []).map(function (item) { return item.text; }).filter(Boolean);
+    if (gains.length) sentence += '，' + gains.join('、');
+    if (costs.length) sentence += '；代价是' + costs.join('、');
+    parts.push(sentence + '。');
+  });
+  (interactions || []).forEach(function (interaction) {
+    if (interaction.requiredNarrativeFacts && interaction.requiredNarrativeFacts.length) parts.push(interaction.requiredNarrativeFacts.join('；') + '。');
+  });
+  if (directorPlan && directorPlan.result) parts.push('导演节拍结果：' + directorPlan.result + '。');
+  const beforeId = envelope && envelope.sceneBeforeId;
+  if (sceneAfter && beforeId && sceneAfter.sceneId !== beforeId) parts.push('场景转移至' + sceneAfter.locationName + '。');
+  const elapsed = envelope && envelope.elapsedTime;
+  if (elapsed) parts.push('时间推进' + elapsed.value + elapsed.unit + '。');
+  return parts.join('').slice(0, 1200) || '本回合本地裁决已提交。';
+};
+
+Story.Narration.buildTurnContract = function (state, envelope, directorPlan, sceneAfter) {
+  envelope = envelope || {};
+  const scene = sceneAfter || state.story.currentScene || {};
+  const mustRenderFacts = [];
+  (envelope.actions || []).forEach(function (action, index) {
+    const actor = state.actors.find(function (candidate) { return candidate.id === action.actorId; });
+    if (!actor || !Story._isHumanActor(state, actor)) return;
+    const targetActor = state.actors.find(function (candidate) { return candidate.id === action.targetId; });
+    const targetName = action.targetName || (targetActor && targetActor.name) || action.targetId || '';
+    const requiredMeaning = [];
+    if (action.category === 'battle' && targetName) requiredMeaning.push(actor.name + '主动攻击' + targetName);
+    else requiredMeaning.push(actor.name + '执行' + Story.Narration._catLabel(action.category));
+    (action.publicEffects || []).forEach(function (fact) { if (requiredMeaning.indexOf(fact) < 0) requiredMeaning.push(fact); });
+    requiredMeaning.push('结果为' + Story.Narration._outcomeLabel(action.outcome));
+    mustRenderFacts.push({
+      factId: 'fact_action_' + index + '_' + action.actorId,
+      kind: 'action', actorId: action.actorId, actorName: actor.name,
+      actionType: action.category, actionText: action.rawText || Story.Narration._catLabel(action.category),
+      source: action.source || 'custom', targetType: action.targetType || '', targetId: action.targetId || '', targetName: targetName,
+      outcome: action.outcome, outcomeLabel: Story.Narration._outcomeLabel(action.outcome),
+      requiredMeaning: requiredMeaning,
+      gains: (action.gains || []).map(function (item) { return item.text; }).filter(Boolean),
+      costs: (action.costs || []).map(function (item) { return item.text; }).filter(Boolean),
+    });
+  });
+  (envelope.interactions || []).forEach(function (interaction, index) {
+    mustRenderFacts.push({
+      factId: 'fact_interaction_' + index,
+      kind: 'interaction', interactionType: interaction.type,
+      actorIds: (interaction.actorIds || []).slice(), targetId: interaction.targetId || '',
+      requiredMeaning: (interaction.requiredNarrativeFacts || []).slice(), gains: [], costs: [],
+    });
+  });
+
+  const entities = Story.Scene.Entity.normalize(scene.visibleEntities)
+    .concat(Story.Scene.Entity.normalize(scene.exits))
+    .concat(Story.Scene.Entity.normalize(scene.availableAssets));
+  (state.assets || []).forEach(function (asset) {
+    if (!asset.visibility || asset.visibility === 'public') entities.push({ id: Story.canonicalEntityId(asset.id), name: asset.name, kind: asset.kind || 'relic' });
+  });
+  (state.story.activeThreads || []).filter(function (thread) {
+    return thread.visibility === 'public' && thread.status === 'active';
+  }).forEach(function (thread) { entities.push({ id: thread.threadId, name: thread.title, kind: 'thread' }); });
+  const seen = {};
+  const entityWhitelist = entities.filter(function (entity) {
+    const key = entity.id || entity.name;
+    if (!key || seen[key]) return false;
+    seen[key] = true; return true;
+  }).map(function (entity) { return { id: entity.id, name: entity.name, type: entity.kind || 'prop' }; });
+  const actorWhitelist = state.actors.map(function (actor) {
+    return { id: actor.id, name: actor.name, displayName: actor.displayName || actor.name, locationId: actor.locationId || scene.locationId, presence: actor.presence || 'present' };
+  });
+  return {
+    contractVersion: '1.0', turnId: envelope.turnId || '', mustRenderFacts: mustRenderFacts,
+    optionalAtmosphere: ['雨水', '灰尘', '风声', '远处无名行人'],
+    forbiddenClaims: [
+      '不得新增未登记的重要 NPC、敌人或妖兽', '不得新增角色未持有的物品',
+      '不得改变攻击目标、角色位置、行动结果或时间跨度', '不得虚构未裁决伤势',
+      '不得把失败改成成功，不得把休息改成调查',
+    ],
+    previousTurnSummary: ((state.story.recentCanonicalSummaries || []).slice(-1)[0]) || '',
+    canonicalScene: {
+      sceneId: scene.sceneId || '', locationId: scene.locationId || '', locationName: scene.locationName || '',
+      timeOfDay: scene.timeOfDay || '', weather: scene.weather || '', pressure: scene.pressure || 0,
+      actorLocations: actorWhitelist.map(function (actor) { return { actorId: actor.id, locationId: actor.locationId, presence: actor.presence }; }),
+    },
+    entityWhitelist: entityWhitelist, actorWhitelist: actorWhitelist,
+    elapsedTime: Story._clone(envelope.elapsedTime || { value: 1, unit: '片刻' }),
+    repetitionPolicy: { doNotRepeatPreviousChapter: true, previousSummaryIsContextOnly: true, minimumFreshParagraphs: 3 },
+    directorResult: directorPlan && directorPlan.result || null,
+  };
+};
+
+Story.Narration.buildSystemPrompt = function () {
+  return [
+    '你是《修行局》的章节渲染器，不是游戏裁判。所有游戏事实已由本地 Resolver 决定。',
+    'turnContract.mustRenderFacts 是本回合已经发生的事实，每一项真人行动都必须在正文中产生明确因果；自定义行动优先级最高。',
+    'chosenActions 是契约的可读镜像，coverageAnchors 是兼容覆盖锚点；两者都不能覆盖 mustRenderFacts。',
+    '不得替换角色、目标、地点、结果和时间；不得新增未登记的重要人物、敌人、妖兽、物品或战斗。',
+    '不得复述上一章。previousTurnSummary 只用于理解承接关系，不是可复制的正文。',
+    '正文 450-850 个中文字，3-5 段，以动作、对话与可感后果呈现契约事实，不要写成摘要。',
+    '只返回严格 JSON 对象 {title, chapter, dialogues, endingImage}，不要 Markdown，不要解释，不要返回状态字段。',
+  ].join('\n');
+};
+
+Story.Narration.buildUserPrompt = function (ctx) {
+  const correction = ctx && ctx.protocolCorrection;
+  const prefix = correction ? [
+    '上一份章节被拒绝。',
+    '错误：' + (correction.previousErrors || []).map(function (error, index) { return (index + 1) + '. ' + (error.message || error.code || error); }).join(' '),
+    '请逐条执行 requiredRepairs，依据 mustRenderFacts 重新生成完整章节。不要解释错误。',
+  ].join('\n') + '\n\n' : '';
+  return prefix + '本回合叙事上下文 JSON：\n' + JSON.stringify(ctx);
+};
+
+Story.Narration._debugSink = null;
+Story.Narration.setDebugSink = function (sink) { Story.Narration._debugSink = typeof sink === 'function' ? sink : null; };
+Story.Narration.emitDebug = async function (event) {
+  if (!Story.Narration._debugSink) return;
+  try { await Story.Narration._debugSink(event); } catch (error) {}
+};
+
+Story.Narration._parsedText = function (narration) {
+  const parsed = Story.Provider && Story.Provider.parseNarrationResponse ? Story.Provider.parseNarrationResponse(narration) : narration;
+  return { title: String(parsed && parsed.title || ''), chapter: String(parsed && parsed.chapter || '') };
+};
+
+Story.Narration._violation = function (code, message, text, details) {
+  return { code: code, message: message, rawPreview: String(text || '').slice(0, 300), details: details || null };
+};
+
+Story.Narration.validateActionFacts = function (narration, contract) {
+  const parsed = Story.Narration._parsedText(narration);
+  const text = parsed.chapter;
+  const actionWords = {
+    rest: ['休息', '睡', '休整', '疗伤'], wait: ['等待', '观望', '按兵不动'], observe: ['观察', '留意', '盯'],
+    investigate: ['调查', '追查', '搜查', '查看'], travel: ['前往', '移动', '动身', '离开'], social: ['交谈', '询问', '说'],
+    negotiate: ['谈判', '交易', '条件'], cultivate: ['修炼', '闭关', '静修'], craft: ['炼制', '锻造', '修复'],
+    battle: ['攻击', '袭击', '出手', '出剑', '攻向', '命中'], flee: ['逃', '撤', '退避'], steal: ['偷', '窃取', '盗取'],
+    aid: ['援护', '帮助', '支援'], deceive: ['欺骗', '伪装', '说谎', '设局'], use_relic: ['御器', '法宝', '遗物', '共鸣'], freeform: ['行动', '尝试'],
+  };
+  const outcomeWords = {
+    great_success: ['大获成功', '完全成功', '额外线索'], success: ['成功', '命中', '得手', '取得'], quiet_success: ['恢复', '缓和', '安稳', '休整', '醒来', '睡觉'],
+    success_with_cost: ['代价', '受伤', '损耗', '暴露'], partial_success: ['未完全', '部分', '打断', '未能全数'],
+    setback: ['失利', '受挫', '未能', '失败'], missed_opportunity: ['错过', '机会流失'], interrupted: ['打断', '中断', '惊扰'],
+    retreat: ['退避', '撤离', '逃离'], stalemate: ['僵持', '制止'], long_action_request: ['尚未开始', '等待同意', '登记请求'],
+  };
+  const facts = (contract && contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'action'; });
+  for (let i = 0; i < facts.length; i++) {
+    const fact = facts[i];
+    const actorHit = !!fact.actorName && text.indexOf(fact.actorName) >= 0;
+    const actionHit = (actionWords[fact.actionType] || []).some(function (word) { return text.indexOf(word) >= 0; });
+    const targetHit = !fact.targetName || fact.targetName === fact.actorName || text.indexOf(fact.targetName) >= 0;
+    const outcomeHit = (outcomeWords[fact.outcome] || []).some(function (word) { return text.indexOf(word) >= 0; });
+    const resultTokens = Story.Narration._coverageTokens((fact.gains || []).concat(fact.costs || []));
+    const resultHit = resultTokens.some(function (token) { return text.indexOf(token) >= 0; });
+    if (fact.actionType === 'battle' && fact.targetType === 'actor') {
+      if (actorHit && actionHit && !targetHit) return Story.Narration._violation('WRONG_ACTION_TARGET', fact.actorName + '的攻击目标必须是' + fact.targetName, text, { factId: fact.factId });
+      if (actorHit && actionHit && targetHit && !outcomeHit) return Story.Narration._violation('WRONG_ACTION_OUTCOME', fact.actorName + '攻击' + fact.targetName + '的结果与本地裁决不一致', text, { factId: fact.factId });
+      if (!(actorHit && actionHit && targetHit && outcomeHit)) return Story.Narration._violation('MISSING_ACTION_FACT', '正文未完整落实' + fact.actorName + '攻击' + fact.targetName, text, { factId: fact.factId });
+    } else if (!(actorHit && actionHit && (outcomeHit || resultHit))) {
+      return Story.Narration._violation('MISSING_ACTION_FACT', '正文未落实真人行动：' + fact.actorName + '·' + fact.actionText, text, { factId: fact.factId });
+    }
+  }
+  return null;
+};
+
+Story.Narration._ngrams = function (text, size) {
+  const normalized = String(text || '').replace(/\s+/g, '').replace(/[\p{P}\p{S}]/gu, '');
+  const set = new Set();
+  for (let i = 0; i <= normalized.length - size; i++) set.add(normalized.slice(i, i + size));
+  return set;
+};
+
+Story.Narration._jaccard = function (a, b) {
+  if (!a.size || !b.size) return 0;
+  let intersection = 0;
+  a.forEach(function (item) { if (b.has(item)) intersection++; });
+  return intersection / (a.size + b.size - intersection);
+};
+
+Story.Narration.validateNovelty = function (chapter, recentChapters) {
+  const parsed = typeof chapter === 'string' ? { title: '', chapter: chapter } : Story.Narration._parsedText(chapter);
+  const recent = (recentChapters || []).map(function (item) { return typeof item === 'string' ? { title: '', chapter: item } : item; });
+  if (parsed.title && recent.slice(-2).some(function (item) { return item.title && item.title.trim() === parsed.title.trim(); })) {
+    return Story.Narration._violation('REPETITIVE_NARRATION', '标题与最近章节重复', parsed.chapter);
+  }
+  const compact = parsed.chapter.replace(/\s+/g, '');
+  const seen24 = {};
+  for (let i = 0; i <= compact.length - 24; i++) {
+    const phrase = compact.slice(i, i + 24);
+    seen24[phrase] = (seen24[phrase] || 0) + 1;
+    if (seen24[phrase] >= 2) return Story.Narration._violation('REPETITIVE_NARRATION', '正文内部有连续 24 字以上的原句重复', parsed.chapter);
+  }
+  const paragraphs = parsed.chapter.split(/\n+/).filter(function (p) { return p.trim().length >= 30; });
+  for (let r = 0; r < recent.length; r++) {
+    const previous = String(recent[r].chapter || '');
+    for (let i = 0; i <= compact.length - 24; i++) {
+      if (previous.replace(/\s+/g, '').indexOf(compact.slice(i, i + 24)) >= 0) return Story.Narration._violation('REPETITIVE_NARRATION', '正文复用了最近章节的长原句', parsed.chapter);
+    }
+    const previousParagraphs = previous.split(/\n+/).filter(function (p) { return p.trim().length >= 30; });
+    if (paragraphs.some(function (p) { return previousParagraphs.some(function (q) { return Story.Narration._jaccard(Story.Narration._ngrams(p, 2), Story.Narration._ngrams(q, 2)) > 0.72; }); })) {
+      return Story.Narration._violation('REPETITIVE_NARRATION', '长段与上一章高度相似', parsed.chapter);
+    }
+    if (Story.Narration._jaccard(Story.Narration._ngrams(parsed.chapter, 3), Story.Narration._ngrams(previous, 3)) > 0.55) {
+      return Story.Narration._violation('REPETITIVE_NARRATION', '全文三字串与最近章节高度重合', parsed.chapter);
+    }
+  }
+  return null;
+};
+
+Story.Narration.validateCanonicalClaims = function (narration, contract) {
+  const text = Story.Narration._parsedText(narration).chapter;
+  const allowedNames = (contract.actorWhitelist || []).map(function (item) { return item.name; })
+    .concat((contract.entityWhitelist || []).map(function (item) { return item.name; }))
+    .concat(contract.optionalAtmosphere || []).filter(Boolean);
+  const requiredText = (contract.mustRenderFacts || []).map(function (fact) { return (fact.requiredMeaning || []).join(' '); }).join(' ');
+  const suspicious = text.match(/(?:蒙面[一-龥]{1,6}|三眼青狼|[一-龥]{1,6}(?:妖兽|妖狼|符修|毒丹|丹炉碎片|神秘追兵))/g) || [];
+  const unknown = suspicious.find(function (name) {
+    return allowedNames.every(function (allowed) { return name.indexOf(allowed) < 0 && allowed.indexOf(name) < 0; }) && requiredText.indexOf(name) < 0;
+  });
+  if (unknown) return Story.Narration._violation('UNREGISTERED_ENTITY', '正文新增了未登记实体：' + unknown, text, { entity: unknown });
+  if (/(当场陨落|永久死亡|无劫飞升|突破大境界)/.test(text) && !/(当场陨落|飞升|突破)/.test(requiredText)) {
+    return Story.Narration._violation('UNAUTHORIZED_EVENT', '正文新增了未经裁决的重大事件', text);
+  }
+  const scene = contract.canonicalScene || {};
+  const locationMatch = text.match(/(?:抵达|来到|转移至)([一-龥A-Za-z0-9·]{2,14})/);
+  if (locationMatch && locationMatch[1].indexOf(scene.locationName || '') < 0 && allowedNames.indexOf(locationMatch[1]) < 0) {
+    return Story.Narration._violation('SCENE_CONTRADICTION', '正文擅自改变了场景地点', text, { location: locationMatch[1] });
+  }
+  return null;
+};
+
+Story.Narration.validateTemporalConsistency = function (narration, contract) {
+  const text = Story.Narration._parsedText(narration).chapter;
+  const elapsedDays = Story.Time.toDays(contract && contract.elapsedTime);
+  if (elapsedDays < 30 && /(数月|三月|半年|数年|百年)/.test(text)) return Story.Narration._violation('TEMPORAL_CONTRADICTION', '正文的长时间跳跃超出本回合裁决', text);
+  if (elapsedDays < 1 && /(三天三夜|数日|几日后)/.test(text)) return Story.Narration._violation('TEMPORAL_CONTRADICTION', '正文的数日时间跳跃超出本回合裁决', text);
+  const timeOfDay = contract && contract.canonicalScene && contract.canonicalScene.timeOfDay || '';
+  if (elapsedDays < 1 && /清晨/.test(timeOfDay) && /(深夜|夜色如墨)/.test(text)) return Story.Narration._violation('TEMPORAL_CONTRADICTION', '场景为清晨，正文却无理由回到深夜', text);
+  const hasTravel = (contract.mustRenderFacts || []).some(function (fact) { return fact.actionType === 'travel' || fact.actionType === 'flee'; });
+  if (!hasTravel && /(远行数日|离开此地数日|赶路数日)/.test(text)) return Story.Narration._violation('TEMPORAL_CONTRADICTION', '正文虚构了未裁决的长途移动', text);
+  return null;
+};
+
+Story.Narration.validateSemantic = function (state, narration, brief) {
+  const contract = brief && brief.turnContract;
+  if (!contract) return [];
+  const recent = (state.story.recentNarrations || []).slice(-3);
+  const checks = [
+    Story.Narration.validateAgainstDirector(narration, brief.director),
+    Story.Narration.validateCoverage(narration, brief),
+    Story.Narration.validateActionFacts(narration, contract),
+    Story.Narration.validateNovelty(narration, recent),
+    Story.Narration.validateCanonicalClaims(narration, contract),
+    Story.Narration.validateTemporalConsistency(narration, contract),
+  ];
+  return checks.filter(Boolean);
+};
+
 /** 构建给 AI 的 NarrationBrief（V3.2 §N2） */
-Story.Narration.buildBrief = function (state, scene, envelope) {
+Story.Narration.buildBrief = function (state, scene, envelope, directorPlan, sceneAfter) {
   const w = state.world;
   const s = state.story;
+  const pending = s.pendingResolution || {};
+  directorPlan = directorPlan || pending.directorPlan || null;
+  sceneAfter = sceneAfter || pending.sceneAfterPreview || scene;
+  const turnContract = Story.Narration.buildTurnContract(state, envelope, directorPlan, sceneAfter);
   const focal = (scene && scene.focalActorIds && scene.focalActorIds.length) ? scene.focalActorIds : (state.actors[0] ? [state.actors[0].id] : []);
   const flags = (w.worldBible && w.worldBible.flags) || {};
   const toneTags = [];
@@ -4371,6 +5143,7 @@ Story.Narration.buildBrief = function (state, scene, envelope) {
     openingAnchors: openingAnchors,
     openingAnchorGroups: openingAnchorGroups,
     forbiddenLeaks: forbiddenLeaks,
+    turnContract: turnContract,
     // V3.3.2：Director 叙事引导——告知 AI 当前卷纲与节拍目标
     director: directorGuide,
     style: {
@@ -4405,7 +5178,7 @@ Story.Narration.assembleFromAI = function (state, scene, envelope, narration) {
     title: title,
     chapter: chapter,
     chapterSummary: chapterSummary,
-    timePassed: (action && action.timePassed) || { value: 1, unit: '片刻' },
+    timePassed: (envelope && envelope.elapsedTime) || { value: 1, unit: '片刻' },
     endingImage: parsed.endingImage || '',
     dialogues: Array.isArray(parsed.dialogues) ? parsed.dialogues : [],
     provenance: provenance,
@@ -4556,7 +5329,7 @@ Story.Narration._catLabel = function (cat) {
   return { rest:'休息', wait:'等待', observe:'观察', investigate:'调查', travel:'行进', social:'交涉', negotiate:'谈判', cultivate:'闭关', craft:'炼制', battle:'战斗', flee:'撤离', steal:'窃取', aid:'援护', deceive:'伪装', use_relic:'御器', freeform:'行动' }[cat] || '行动';
 };
 Story.Narration._outcomeLabel = function (o) {
-  return { great_success:'大获成功', success:'成功', quiet_success:'悄然成功', success_with_cost:'有代价的成功', partial_success:'部分成功', setback:'受挫', missed_opportunity:'错过机会', interrupted:'被打扰', retreat:'退避', stalemate:'僵持' }[o] || '已成';
+  return { great_success:'大获成功', success:'成功', quiet_success:'悄然成功', success_with_cost:'有代价的成功', partial_success:'部分成功', setback:'受挫', missed_opportunity:'错过机会', interrupted:'被打扰', retreat:'退避', stalemate:'僵持', long_action_request:'等待长期行动同意' }[o] || '已成';
 };
 
 Story.Narration._stripForbidden = function (text) {
@@ -4568,12 +5341,15 @@ Story.Narration._stripForbidden = function (text) {
 /** 写入叙事到 currentChapter（V3.2） */
 Story.Narration.applyNarration = function (state, chapter, envelope, isOpening) {
   const s = state.story;
+  const pending = s.pendingResolution || {};
+  const canonicalSummary = Story.Narration.buildCanonicalSummary(state, envelope, envelope && envelope.interactions, pending.directorPlan, s.currentScene);
   s.chapterIndex += 1;
   s.currentChapter = {
     chapterId: 'chapter_' + String(s.chapterIndex).padStart(4, '0'),
     title: chapter.title,
     chapter: chapter.chapter,
-    chapterSummary: chapter.chapterSummary || (chapter.chapter || '').slice(0, 80),
+    chapterSummary: canonicalSummary,
+    canonicalSummary: canonicalSummary,
     timePassed: chapter.timePassed || null,
     endingImage: chapter.endingImage || '',
     dialogues: Array.isArray(chapter.dialogues) ? chapter.dialogues : [],
@@ -4581,8 +5357,10 @@ Story.Narration.applyNarration = function (state, chapter, envelope, isOpening) 
     narrationStatus: chapter.narrationStatus || 'ok',
     renderVersion: 0,
   };
-  // recentSummary
-  s.recentSummary = (s.recentSummary ? s.recentSummary + ' ' : '') + s.currentChapter.chapterSummary;
+  s.recentCanonicalSummaries = (s.recentCanonicalSummaries || []).concat([canonicalSummary]).slice(-8);
+  s.recentNarrations = (s.recentNarrations || []).concat([{ title: chapter.title, chapter: chapter.chapter }]).slice(-4);
+  // 记忆只积累本地事实摘要，不再取 AI 正文开头。
+  s.recentSummary = (s.recentSummary ? s.recentSummary + ' ' : '') + canonicalSummary;
   s.recentSummary = s.recentSummary.slice(-600);
   // API 状态
   state.api.lastStatus = chapter.provenance === 'offline-resolved' ? 'offline' : 'ai';
@@ -4603,7 +5381,7 @@ Story.Provider.capabilities = {
   supportsChatCompletions: true,
 };
 
-Story.Provider.ERROR_CODES = ['NO_API_CONFIG','NO_API_KEY','NETWORK_ERROR','CORS_ERROR','HTTP_401','HTTP_403','HTTP_404','HTTP_429','HTTP_5XX','TIMEOUT','EMPTY_RESPONSE','INVALID_JSON','INVALID_SCHEMA','MODEL_OVERREACH','FORBIDDEN_REVEAL','MISSING_REQUIRED_BEAT','MISSING_OPENING_ANCHOR'];
+Story.Provider.ERROR_CODES = ['NO_API_CONFIG','NO_API_KEY','NETWORK_ERROR','CORS_ERROR','HTTP_401','HTTP_403','HTTP_404','HTTP_429','HTTP_5XX','TIMEOUT','EMPTY_RESPONSE','INVALID_JSON','INVALID_SCHEMA','MODEL_OVERREACH','FORBIDDEN_REVEAL','MISSING_REQUIRED_BEAT','MISSING_OPENING_ANCHOR','MISSING_ACTION_FACT','WRONG_ACTION_TARGET','WRONG_ACTION_OUTCOME','REPETITIVE_NARRATION','UNREGISTERED_ENTITY','UNAUTHORIZED_EVENT','SCENE_CONTRADICTION','TEMPORAL_CONTRADICTION'];
 
 /** 调用 AI 叙事（兼容旧 ai.provider.narrate）。返回归一化后的 {title,chapter,dialogues,endingImage,_autoFixed} 或 null。 */
 Story.Provider.narrate = async function (state, brief) {
@@ -4622,6 +5400,10 @@ Story.Provider.narrate = async function (state, brief) {
   Story.setAIStatus('requesting', { message: '正在请求 AI 叙事……', lastRequestAt: requestedAt });
   try {
     const ctx = Story.Provider._briefToCtx(state, brief);
+    const providerName = Story.ai.providerMeta && Story.ai.providerMeta.provider || '';
+    // 无 meta 的 Provider 是 V3.3 旧插件/单元测试兼容路径；浏览器与服务端正式 Provider 都必须提供名称并执行语义校验。
+    const skipSemanticValidation = !providerName || /^mock(?:-|$)/.test(providerName) || Story.ai.providerMeta && Story.ai.providerMeta.skipSemanticValidation;
+    await Story.Narration.emitDebug({ stage: 'context', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', contract: brief.turnContract, context: ctx });
     // 最多两次：首次失败（空响应或字段不合规）自动重试一次（V3 §13 协议重试）
     for (let attempt = 0; attempt < 2; attempt++) {
       const wrapped = await Story.ai._withTimeout(Story.ai.provider.narrate(ctx), Story.ai.timeoutMs);
@@ -4632,6 +5414,7 @@ Story.Provider.narrate = async function (state, brief) {
         return null;
       }
       let raw = wrapped || null;
+      await Story.Narration.emitDebug({ stage: 'raw', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', attempt: attempt + 1, raw: raw });
       state.api.lastResponseAt = Date.now();
       if (!raw) {
         if (attempt === 0) { Story.setAIStatus('received', { message: '首次响应为空，自动重试一次。', lastRequestAt: requestedAt }); continue; }
@@ -4643,12 +5426,45 @@ Story.Provider.narrate = async function (state, brief) {
       const parsed = Story.Provider.parseNarrationResponse(raw);
       const errors = Story.Provider.validateNarrationOnly(parsed);
       if (errors.length) {
-        if (attempt === 0) { Story.setAIStatus('received', { message: '检测到格式偏差，自动修复格式后重试。', errors: errors, lastRequestAt: requestedAt }); continue; }
+        await Story.Narration.emitDebug({ stage: 'validation', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', attempt: attempt + 1, valid: false, errors: errors.map(function (message) { return { code: 'INVALID_SCHEMA', message: message }; }) });
+        if (attempt === 0) {
+          ctx.protocolCorrection = {
+            previousErrors: errors.map(function (message) { return { code: 'INVALID_SCHEMA', message: message }; }),
+            requiredRepairs: errors.slice(), previousOutputPreview: String(parsed.chapter || '').slice(0, 500),
+          };
+          await Story.Narration.emitDebug({ stage: 'correction', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', correction: ctx.protocolCorrection });
+          Story.setAIStatus('received', { message: '检测到格式偏差，自动修复格式后重试。', errors: errors, lastRequestAt: requestedAt }); continue;
+        }
         Story.setAIStatus('fallback', { code: 'INVALID_SCHEMA', message: 'AI 返回字段不合规，本回合裁决已保留，等待重试。', errors: errors, lastRequestAt: requestedAt });
         state.api.lastStatus = 'offline'; state.api.lastErrorCode = 'INVALID_SCHEMA'; state.api.lastErrorMessage = errors.join('；');
         return null;
       }
+      const semanticErrors = skipSemanticValidation ? [] : Story.Narration.validateSemantic(state, parsed, brief);
+      if (semanticErrors.length) {
+        await Story.Narration.emitDebug({ stage: 'validation', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', attempt: attempt + 1, valid: false, errors: semanticErrors });
+        if (attempt === 0) {
+          ctx.protocolCorrection = {
+            previousErrors: semanticErrors.map(function (error) { return { code: error.code, message: error.message }; }),
+            requiredRepairs: semanticErrors.map(function (error) { return error.message; }),
+            previousOutputPreview: String(parsed.chapter || '').slice(0, 800),
+          };
+          state.api.lastSemanticRepair = { status: 'started', turnId: brief.turnContract && brief.turnContract.turnId || '', errors: ctx.protocolCorrection.previousErrors, startedAt: Date.now() };
+          await Story.Narration.emitDebug({ stage: 'correction', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', correction: ctx.protocolCorrection });
+          Story.setAIStatus('received', { message: '章节语义与本地事实契约不符，正在自动修复一次。', errors: semanticErrors, lastRequestAt: requestedAt });
+          continue;
+        }
+        const violation = semanticErrors[0];
+        state.api.lastSemanticRepair = { status: 'failed', turnId: brief.turnContract && brief.turnContract.turnId || '', errors: semanticErrors, finishedAt: Date.now() };
+        Story.setAIStatus('fallback', { code: violation.code, message: violation.message, errors: semanticErrors, lastRequestAt: requestedAt });
+        state.api.lastStatus = 'offline'; state.api.lastErrorCode = violation.code; state.api.lastErrorMessage = violation.message;
+        return null;
+      }
+      await Story.Narration.emitDebug({ stage: 'validation', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', attempt: attempt + 1, valid: true, errors: [] });
       // 成功：越权字段在此被剥离（仅保留文案）
+      if (state.api.lastSemanticRepair && state.api.lastSemanticRepair.status === 'started') {
+        state.api.lastSemanticRepair.status = 'succeeded';
+        state.api.lastSemanticRepair.finishedAt = Date.now();
+      }
       state.api.lastStatus = 'ok'; state.api.lastErrorCode = null; state.api.lastErrorMessage = '';
       const msg = parsed._autoFixed ? '已自动修复格式并采用 API 正文。' : '已采用 API 正文。';
       Story.setAIStatus('success', { message: msg, lastRequestAt: requestedAt });
@@ -4693,7 +5509,7 @@ Story.Provider._briefToCtx = function (state, brief) {
       privateIntent: a.custom ? (a.custom.text || '') : '',
       category: a.category,
       targetId: a.targetId || '',
-      targetName: target ? (target.name || target.title || target.id || target.threadId) : '',
+      targetName: a.targetName || (target ? (target.name || target.title || target.id || target.threadId) : ''),
       outcome: a.outcome || 'success',
       outcomeLabel: Story.Narration._outcomeLabel(a.outcome),
       gains: (a.gains || []).map(function (g) { return g.text; }),
@@ -4727,7 +5543,7 @@ Story.Provider._briefToCtx = function (state, brief) {
 
   // 活跃线索/威胁
   var activeThreads = (state.story.activeThreads || []).filter(function (t) {
-    return t.status === 'active' || t.status === 'dormant';
+    return t.visibility === 'public' && t.status === 'active';
   }).map(function (t) {
     return {
       threadId: t.threadId, title: t.title, type: t.type,
@@ -4771,6 +5587,7 @@ Story.Provider._briefToCtx = function (state, brief) {
     chosenActions: chosenActions,
     turnEvents: turnEvents,
     narrationBeats: narrationBeats,
+    turnContract: brief.turnContract,
     activeThreads: activeThreads,
     world: {
       name: brief.world.name, year: brief.world.year,
@@ -4781,9 +5598,11 @@ Story.Provider._briefToCtx = function (state, brief) {
     cast: cast,
     previousChapter: state.story.currentChapter ? {
       title: state.story.currentChapter.title,
-      shortSummary: (state.story.currentChapter.chapterSummary || '').slice(0, 300),
-      chapterExcerpt: (state.story.currentChapter.chapter || '').slice(-2000),
-      endingImage: state.story.currentChapter.endingImage || '',
+      canonicalSummary: (state.story.currentChapter.canonicalSummary || state.story.currentChapter.chapterSummary || '').slice(0, 600),
+      endingState: {
+        locationId: state.story.currentScene && state.story.currentScene.locationId || '',
+        timeOfDay: state.story.currentScene && state.story.currentScene.timeOfDay || '',
+      },
     } : null,
     recentSummary: (state.story.recentSummary || '').slice(-600) || null,
     chronicleRecent: chronicleRecent.length ? chronicleRecent : null,

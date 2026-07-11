@@ -18,15 +18,40 @@ function setupEchoAI() {
   Story.setAIEnabled(true);
   Story.registerAIProvider({
     narrate: async function (ctx) {
-      var actions = (ctx.chosenActions || []).map(function (a) {
+      var actions = (ctx.chosenActions || []).filter(function (a) {
+        return a.controller === 'human';
+      }).map(function (a) {
         return [a.actorName, a.publicAction, a.targetName, (a.gains || []).join(' '), (a.costs || []).join(' ')].join(' ');
       }).join('。');
-      var body = actions || 'Opening scene establishes the selected arc and all actors gather before the first decision.';
-      if (!actions && ctx.brief && Array.isArray(ctx.brief.openingAnchors)) {
+      var body = ctx.brief && ctx.brief.isOpening
+        ? 'Opening scene establishes the selected arc and all actors gather before the first decision.'
+        : 'The established scene responds to the human decision and keeps the local ruling visible.';
+      if (ctx.brief && Array.isArray(ctx.brief.openingAnchors)) {
         body += ' 开局锚点：' + ctx.brief.openingAnchors.slice(0, 8).join('、') + '。';
       }
-      body += ' The narration keeps the local ruling intact, shows pressure, consequence, and the next visible problem. '.repeat(8);
-      return JSON.stringify({ title: 'Observable Director', chapter: body, dialogues: [], endingImage: '' });
+      var turnFacts = ctx && ctx.turnContract && ctx.turnContract.mustRenderFacts || [];
+      var factText = turnFacts.map(function (fact) {
+        return [fact.actorName || '', fact.actionText || '']
+          .concat(fact.requiredMeaning || [], fact.gains || [], fact.costs || [])
+          .join(' / ');
+      }).filter(Boolean).join(' / ');
+      if (factText) body += ' Turn facts: ' + factText + '. ';
+      if (!(ctx.brief && ctx.brief.isOpening)) body += [
+        'The narration keeps the local ruling intact while the gathered actors assess the danger.',
+        'Pressure gathers at the edge of the scene and gives every witness a concrete reason to act.',
+        'A visible consequence follows from the chosen approach without replacing the resolver result.',
+        'Each participant reacts according to the public facts and their established relationships.',
+        'Visible details in the established setting remain available to the next turn.',
+        'No hidden thread is disclosed, yet the immediate conflict becomes harder to ignore.',
+        'The director beat advances through observable evidence instead of an unexplained summary.',
+        'A new decision point closes the chapter and preserves the active pressure clock.',
+      ].join(' ');
+      return JSON.stringify({
+        title: 'Observable Director ' + String(ctx.brief && ctx.brief.chapterIndex || 0),
+        chapter: body,
+        dialogues: [],
+        endingImage: '',
+      });
     },
   }, { provider: 'echo', model: 'echo-director' });
 }

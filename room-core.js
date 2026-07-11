@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * 《修行局》V3.4.0 — 房间协调器 + 权威联机视图（room-core.js）
+ * 《修行局》V3.4.1 — 房间协调器 + 权威联机视图（room-core.js）
  * ============================================================================
  * 职责：管理房间、席位、角色绑定、回合收集、机器人自动落子、统一结算。
  *   Story 只负责叙事，Room 负责秩序与隐私。
@@ -14,7 +14,7 @@
  *   - RoomView.getForSeat（按席位过滤隐私视图）
  *   - 本地存档与恢复
  *
- * V3.4.0 由 server/room-runtime.js 在服务端串行调用协调器，浏览器仅持有 RoomView。
+ * V3.4.1 由 server/room-runtime.js 在服务端串行调用协调器，浏览器仅持有 RoomView。
  * ============================================================================
  */
 const Room = {};
@@ -27,7 +27,7 @@ const Room = {};
     : (typeof globalThis !== 'undefined' ? globalThis.Story : null);
   if (!Story) throw new Error('story-core.js must be loaded before room-core.js');
 
-  Room.VERSION = '3.4.0';
+  Room.VERSION = '3.4.1';
   Room.MAX_SEATS = 4;
 
   /** 机器人策略模板（影响描述与未来权重，当前决策由 Story.aiChoose 执行） */
@@ -64,6 +64,7 @@ const Room = {};
         allowCustomActions: config.allowCustomActions !== false,
         allowSpectators: !!config.allowSpectators,
         aiNarrationMode: config.aiNarrationMode || 'host-byok',  // host-byok | offline
+        pvpMode: config.pvpMode || 'dramatic',                  // off | dramatic | full
       },
       seats: [],
       storySession: null,                       // StoryState（开局后填充）
@@ -122,6 +123,20 @@ const Room = {};
    * ============================================================ */
 
   var _rooms = new Map();
+
+  Room.SerialQueue = function () { this.tail = Promise.resolve(); };
+  Room.SerialQueue.prototype.run = function (fn) {
+    var next = this.tail.then(fn, fn);
+    this.tail = next.catch(function () {});
+    return next;
+  };
+  // Story 仍有全局 state/RNG/Provider，因此所有房间共用一条执行队列。
+  Room.storyExecutionQueue = new Room.SerialQueue();
+  Room.runStoryTask = function (fn) {
+    // 全局串行是服务端多房间保护；浏览器本地单房直接执行，避免跨 realm Promise 队列阻塞 UI 事件循环。
+    var isNodeRuntime = typeof module !== 'undefined' && module.exports;
+    return isNodeRuntime ? Room.storyExecutionQueue.run(fn) : fn();
+  };
 
   Room.coordinator = {
     _rooms: _rooms,
@@ -246,14 +261,20 @@ const Room = {};
       room.status = 'generating';
       try {
         var actors = occupied.map(function (s) {
-          return Object.assign({}, s.actorSetup, { seatId: s.seatId });
+          return Object.assign({}, s.actorSetup, {
+            seatId: s.seatId,
+            controller: s.kind === 'human' ? 'human' : 'bot',
+            roomDisplayName: s.displayName,
+          });
         });
-        var storyState = await Story.createSession({
+        var storyState = await Room.runStoryTask(function () { return Story.createSession({
           seed: room.settings.seed || undefined,
           actors: actors,
           narrativePace: room.settings.narrativePace,
-        });
+          pvpMode: room.settings.pvpMode,
+        }); });
         room.storySession = storyState;
+        storyState.roomId = room.roomId;
         // 绑定 actorId 到 seat
         occupied.forEach(function (s) {
           var actor = storyState.actors.find(function (a) { return a.seatId === s.seatId; });
@@ -301,16 +322,22 @@ const Room = {};
       room.status = 'generating';
       try {
         var actors = occupied.map(function (s) {
-          return Object.assign({}, s.actorSetup, { seatId: s.seatId });
+          return Object.assign({}, s.actorSetup, {
+            seatId: s.seatId,
+            controller: s.kind === 'human' ? 'human' : 'bot',
+            roomDisplayName: s.displayName,
+          });
         });
         // 跳过开局生成，等待投票后激活
-        var storyState = await Story.createSession({
+        var storyState = await Room.runStoryTask(function () { return Story.createSession({
           seed: room.settings.seed || undefined,
           actors: actors,
           narrativePace: room.settings.narrativePace,
+          pvpMode: room.settings.pvpMode,
           skipOpening: true,
-        });
+        }); });
         room.storySession = storyState;
+        storyState.roomId = room.roomId;
         occupied.forEach(function (s) {
           var actor = storyState.actors.find(function (a) { return a.seatId === s.seatId; });
           if (actor) s.actorId = actor.id;
@@ -380,7 +407,7 @@ const Room = {};
       room.directorVote.finalizedAt = Date.now();
       room.directorVote.selectedArcId = winner;
       // 激活卷纲 → 生成开局场景与叙事
-      await Story.Director.finalizeSessionWithArc(state, winner);
+      await Room.runStoryTask(function () { return Story.Director.finalizeSessionWithArc(state, winner); });
       // 正常开局流程
       room.status = 'generating';
       var openPhase = Story.getTurnPhase(state);
@@ -515,7 +542,8 @@ const Room = {};
       if (!room.turn) room.turn = { turnId: '', round: 0, phase: 'idle', openedAt: 0, lockedAt: 0, submittedActorIds: [], actionsByActorId: {}, botStatusByActorId: {}, resolutionId: null };
       if (room.turn.lastError === undefined) room.turn.lastError = null;
       if (!room.eventLog) room.eventLog = [];
-      if (!room.settings) room.settings = { seed: '', narrativePace: '常规', allowCustomActions: true, allowSpectators: false, aiNarrationMode: 'host-byok' };
+      if (!room.settings) room.settings = { seed: '', narrativePace: '常规', allowCustomActions: true, allowSpectators: false, aiNarrationMode: 'host-byok', pvpMode: 'dramatic' };
+      if (!room.settings.pvpMode) room.settings.pvpMode = 'dramatic';
       room._pending = null;
       // 恢复 Story RNG
       if (room.storySession) {
@@ -634,6 +662,16 @@ const Room = {};
     };
   }
 
+  function _logNarrationRepairEvents(room) {
+    var repair = room && room.storySession && room.storySession.api && room.storySession.api.lastSemanticRepair;
+    if (!repair || repair.reportedAt) return;
+    var payload = { round: room.turn.round, turnId: repair.turnId || room.turn.turnId, errors: repair.errors || [] };
+    _logEvent(room, { type: 'NARRATION_VALIDATION_FAILED', visibility: 'host', payload: payload });
+    _logEvent(room, { type: 'NARRATION_AUTO_REPAIR_STARTED', visibility: 'host', payload: payload });
+    _logEvent(room, { type: repair.status === 'succeeded' ? 'NARRATION_AUTO_REPAIR_SUCCEEDED' : 'NARRATION_AUTO_REPAIR_FAILED', visibility: 'host', payload: payload });
+    repair.reportedAt = Date.now();
+  }
+
   /** 开启新回合：重置收集状态，机器人自动落子 */
   function _openTurn(room) {
     if (!room.storySession) return;
@@ -702,7 +740,10 @@ const Room = {};
     _logEvent(room, { type: 'NARRATION_STARTED', visibility: 'public', payload: { round: room.turn.round } });
     try {
       var actions = Object.assign({}, room.turn.actionsByActorId);
-      await Story.resolveTurn(room.storySession, actions);
+      await Room.runStoryTask(function () {
+        return Story.resolveTurn(room.storySession, actions, { beforeNarration: room._beforeNarration });
+      });
+      _logNarrationRepairEvents(room);
       // V3.3.1：resolveTurn 成功返回后，根据 turnPhase 判断结果
       var phase = Story.getTurnPhase(room.storySession);
       if (phase === 'awaiting_narration' || phase === 'narration_failed') {
@@ -737,6 +778,7 @@ const Room = {};
       _logEvent(room, { type: 'NARRATION_FAILED', visibility: 'host', payload: { error: e.message } });
     } finally {
       room._pending = null;
+      room._beforeNarration = null;
     }
   }
 
@@ -752,7 +794,8 @@ const Room = {};
   async function _retryNarration(room, options) {
     room.turn.lastError = null;
     try {
-      await Story.retryNarration(room.storySession, options);
+      await Room.runStoryTask(function () { return Story.retryNarration(room.storySession, options); });
+      _logNarrationRepairEvents(room);
       var phase = Story.getTurnPhase(room.storySession);
       if (phase === 'narration_failed' || phase === 'awaiting_narration') {
         // 仍失败：保持 narration_failed
@@ -780,6 +823,7 @@ const Room = {};
       _logEvent(room, { type: 'NARRATION_RETRY_FAILED', visibility: 'host', payload: { round: room.turn.round, error: e.message } });
     } finally {
       room._pending = null;
+      room._beforeNarration = null;
     }
   }
 

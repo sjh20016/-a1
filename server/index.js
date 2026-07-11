@@ -12,6 +12,7 @@ const { RoomRuntime, send } = require('./room-runtime.js');
 const { FileStore } = require('./persistence/file-store.js');
 const { createLogger } = require('./utils/logger.js');
 const { registerServerAI } = require('./ai-provider.js');
+const { createNarrationDebugSink } = require('./narration-debug.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const STATIC_ROUTES = {
@@ -28,7 +29,8 @@ function createServer(options) {
   var logger = options.logger || createLogger(console);
   var store = options.store || new FileStore({ roomSaveDir: config.roomSaveDir });
   if (!options.skipAIRegistration) registerServerAI(Story, config, logger, options.aiProvider);
-  var runtime = options.runtime || new RoomRuntime({ Room: Room, Story: Story, store: store, logger: logger });
+  Story.Narration.setDebugSink(config.narrationDebug ? createNarrationDebugSink({ dataDir: config.dataDir }) : null);
+  var runtime = options.runtime || new RoomRuntime({ Room: Room, Story: Story, store: store, logger: logger, config: config });
 
   var server = http.createServer(function (request, response) {
     var requestUrl = new URL(request.url, 'http://localhost');

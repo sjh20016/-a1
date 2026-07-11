@@ -1,0 +1,25 @@
+{
+  "name": "连续休息与玩家攻击测试",
+  "arcId": "sealed_realm",
+  "rounds": 10,
+  "actors": [
+    {
+      "seat": "A",
+      "name": "飞猪",
+      "controller": "human",
+      "repeatedAction": "睡觉"
+    },
+    {
+      "seat": "B",
+      "name": "沈青萝",
+      "controller": "human",
+      "strategy": "first_choice"
+    },
+    {
+      "seat": "C",
+      "name": "江北客",
+      "controller": "human",
+      "repeatedAction": "试图攻击玩家A"
+    }
+  ]
+}

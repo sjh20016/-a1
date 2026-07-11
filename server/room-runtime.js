@@ -17,6 +17,7 @@ class RoomRuntime {
     this.Story = options.Story;
     this.store = options.store;
     this.logger = options.logger || console;
+    this.config = options.config || {};
     this.roomCodes = new Map();
     this.socketsByRoom = new Map();
     this.socketMeta = new WeakMap();
@@ -255,10 +256,29 @@ class RoomRuntime {
           await self.Room.coordinator.finalizeArcVote(room.roomId, message.seatId);
           break;
         case 'submit_action': {
+          var boundaryResolved = false;
+          var resolveBoundary;
+          var boundaryPersisted = new Promise(function (resolve) { resolveBoundary = resolve; });
+          room._beforeNarration = async function () {
+            self.broadcastRoomViews(room);
+            await self.persist(room);
+            boundaryResolved = true;
+            resolveBoundary();
+          };
           self.Room.coordinator.submitAction(room.roomId, message.seatId, payload.action);
           self.broadcastRoomViews(room);
           var pending = room._pending;
-          if (pending) await pending;
+          if (pending) {
+            // pendingResolution 已建立后的快照必须先落盘，然后才等待 AI。
+            await Promise.race([boundaryPersisted, pending]);
+            await pending;
+          } else {
+            room._beforeNarration = null;
+            await self.persist(room);
+            boundaryResolved = true;
+            resolveBoundary();
+          }
+          if (!boundaryResolved) resolveBoundary();
           break;
         }
         case 'cancel_action':
