@@ -3835,7 +3835,8 @@ Story.Resolver.resolveActorAction = function (state, scene, intent) {
   };
 
   /* 近身互动必须经过本地目标存在性裁决，不能让 Narrator 把远方或未知对象写成已发生。 */
-  var requiresPresentTarget = ['battle', 'social', 'negotiate', 'steal', 'aid', 'deceive', 'use_relic'].indexOf(category) >= 0;
+  var requiresPresentTarget = ['battle', 'social', 'negotiate', 'steal', 'aid', 'deceive', 'use_relic'].indexOf(category) >= 0 ||
+    (category === 'investigate' && ['npc', 'actor', 'relic'].indexOf(intent.targetType) >= 0);
   if (requiresPresentTarget && (intent.targetKnown === false || intent.targetPresent === false || intent.targetReachable === false)) {
     base.outcome = 'setback';
     base.gains = [];
@@ -5298,19 +5299,46 @@ Story.Narration.validateActionFacts = function (narration, contract) {
 };
 
 /* V3.4.2：按 actor 局部窗口核对事实，避免跨段拼接出“伪覆盖”。 */
-Story.Narration._factWindow = function (text, actorName) {
+Story.Narration._factWindow = function (text, actorName, fact) {
   var source = String(text || '');
-  var index = actorName ? source.indexOf(actorName) : -1;
-  if (index < 0) return '';
-  return source.slice(Math.max(0, index - 120), Math.min(source.length, index + String(actorName).length + 180));
+  if (!actorName) return '';
+  var name = String(actorName);
+  var positions = [];
+  var cursor = 0;
+  while (cursor < source.length) {
+    var index = source.indexOf(name, cursor);
+    if (index < 0) break;
+    positions.push(index);
+    cursor = index + name.length;
+  }
+  if (!positions.length) return '';
+  var bestWindow = '';
+  var bestScore = -1;
+  var actionTokens = fact ? Story.Narration._factActionTokens(fact) : [];
+  positions.forEach(function (position) {
+    var candidate = source.slice(Math.max(0, position - 120), Math.min(source.length, position + name.length + 180));
+    var score = 0;
+    if (fact) {
+      if (fact.targetName && candidate.indexOf(fact.targetName) >= 0) score += 2;
+      if (actionTokens.some(function (token) { return token && candidate.indexOf(token) >= 0; })) score += 4;
+      if (fact.outcomeLabel && candidate.indexOf(fact.outcomeLabel) >= 0) score += 1;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestWindow = candidate;
+    }
+  });
+  return bestWindow;
 };
 Story.Narration._factActionTokens = function (fact) {
   var tokens = [];
   var raw = String(fact && fact.actionText || '').replace(/[，。；：、“”‘’（）()\s]+/g, '');
-  if (raw.length >= 2) tokens.push(raw.slice(0, Math.min(10, raw.length)));
+  var agencyAction = !!(fact && fact.agencyPolicy && fact.agencyPolicy.affectsOtherHuman);
+  if (raw.length >= 2 && !agencyAction) tokens.push(raw.slice(0, Math.min(10, raw.length)));
   var words = {
     rest: ['休息', '休养', '睡', '休整', '疗伤'], wait: ['等待', '观望', '按兵不动'], observe: ['观察', '留意', '盯'], investigate: ['调查', '追查', '搜查', '查看', '寻找'], travel: ['前往', '移动', '动身', '离开', '转向', '跑去'], social: ['交谈', '询问', '说', '指认', '指控'], negotiate: ['谈判', '交易', '条件'], cultivate: ['修炼', '闭关', '静修'], craft: ['炼制', '锻造', '修复'], battle: ['攻击', '袭击', '出手', '出剑', '攻向', '命中'], flee: ['逃', '撤', '退避'], steal: ['偷', '窃取', '盗取'], aid: ['援护', '帮助', '支援'], deceive: ['欺骗', '伪装', '说谎', '诬告', '设局'], use_relic: ['御器', '法宝', '遗物', '共鸣'], freeform: ['行动', '尝试']
   };
+  if (agencyAction) tokens = tokens.concat(['尝试', '试图', '拉住', '拉扯', '挣脱', '拒绝', '自行选择']);
   return tokens.concat(words[fact.actionType] || []).concat((fact.requiredMeaning || []).map(function (meaning) { return String(meaning).slice(0, 12); }));
 };
 Story.Narration.validateActionFacts = function (narration, contract) {
@@ -5319,7 +5347,7 @@ Story.Narration.validateActionFacts = function (narration, contract) {
   var facts = (contract && contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'action'; });
   for (var i = 0; i < facts.length; i++) {
     var fact = facts[i];
-    var window = Story.Narration._factWindow(text, fact.actorName);
+    var window = Story.Narration._factWindow(text, fact.actorName, fact);
     var actorHit = !!window;
     var actionHit = Story.Narration._factActionTokens(fact).some(function (token) { return token && window.indexOf(token) >= 0; });
     var targetHit = !fact.targetName || fact.targetName === fact.actorName || window.indexOf(fact.targetName) >= 0;
@@ -5450,8 +5478,17 @@ Story.Narration.validatePlayerAgency = function (narration, contract) {
   for (var i = 0; i < facts.length; i++) {
     var fact = facts[i];
     var target = fact.targetName;
-    var window = Story.Narration._factWindow(text, fact.actorName);
-    if (target && humanNames.indexOf(target) >= 0 && /(?:强迫|控制|替[^，。]{0,8}(?:接受|决定|放弃)|迫使|不由自主|被迫跟随|直接让)/.test(window) && window.indexOf(target) >= 0) {
+    var window = Story.Narration._factWindow(text, fact.actorName, fact);
+    var escapedTarget = String(target || '').replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+    var directControl = escapedTarget && new RegExp(
+      '(?:强迫|控制|强拉|拽着|迫使|逼着|命令|直接让)[^，。；]{0,4}' + escapedTarget +
+      '|' + escapedTarget + '[^，。；]{0,4}(?:被迫|不由自主|被强拉|被控制|被迫跟随)' +
+      '|(?:替|代替)' + escapedTarget + '[^，。；]{0,6}(?:接受|决定|放弃)'
+    );
+    var controlMatch = directControl && directControl.exec(window);
+    var controlPrefix = controlMatch ? window.slice(Math.max(0, controlMatch.index - 4), controlMatch.index) : '';
+    var explicitlyNegated = /(?:没有|并未|未曾|不曾|未|不)$/.test(controlPrefix);
+    if (target && humanNames.indexOf(target) >= 0 && controlMatch && !explicitlyNegated) {
       return Story.Narration._violation('PLAYER_AGENCY_VIOLATION', fact.actorName + '不能直接控制' + target + '的身体、立场或选择', text, { factId: fact.factId, targetName: target });
     }
   }
@@ -5518,7 +5555,7 @@ Story.Narration.validateClaimEvidence = function (narration, contract) {
       if (!claim || !claim.subjectName || !claim.predicate) continue;
       var asserted = claim.subjectName + claim.predicate;
       if (text.indexOf(asserted) >= 0) {
-        var window = Story.Narration._factWindow(text, fact.actorName);
+        var window = Story.Narration._factWindow(text, fact.actorName, fact);
         if (!/(声称|指认|指控|诬告|据称|怀疑|自称|认为|宣称)/.test(window)) return Story.Narration._violation('EVIDENCE_STATUS_VIOLATION', '未证实指控被正文写成客观事实：' + asserted, text, { factId: fact.factId, claim: claim });
       }
     }

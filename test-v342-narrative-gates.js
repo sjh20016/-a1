@@ -60,6 +60,14 @@ async function main() {
   const agency = Story.Narration.validatePlayerAgency({ chapter: '阿萝强迫阿悟跟着自己走，阿悟只能放弃本轮行动。' }, contract);
   ok('强制控制真人被拒绝', agency && agency.code === 'PLAYER_AGENCY_VIOLATION');
 
+  const agencyAllowed = Story.Narration.validatePlayerAgency({ chapter: '阿萝攻击阿悟，攻势迫使旁观者确认阿悟仍能自行选择；阿萝没有替阿悟接受任何决定。' }, contract);
+  ok('旁观者受影响和明确否定控制不会误报自主权', agencyAllowed === null);
+
+  const pullFact = contract.mustRenderFacts.find(function (fact) { return fact.kind === 'action' && fact.actorId === 'b'; });
+  const distantMention = '阿萝先在远处看了一眼。' + '石壁上的旧刻痕只记录风向与水汽，没有改变任何人的本轮选择。'.repeat(8) + '\n\n阿萝尝试拉住阿悟跳舞，但阿悟拒绝，阿萝因此受挫。';
+  const localWindow = Story.Narration.validateActionFacts({ chapter: distantMention }, { mustRenderFacts: [pullFact], actorWhitelist: contract.actorWhitelist });
+  ok('局部事实窗口选择真正行动段而非人物首次提及', localWindow === null, localWindow && localWindow.message);
+
   const consequence = Story.Narration.validateConsequenceBudget({ chapter: '阿悟在煮面时天道回应，面汤浮现灵脉地图。' }, contract);
   ok('荒诞行动不能凭空获得超自然奖励', consequence && ['UNAUTHORIZED_SUPERNATURAL_EFFECT', 'UNAUTHORIZED_CLUE'].indexOf(consequence.code) >= 0);
 
