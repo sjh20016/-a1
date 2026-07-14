@@ -1,8 +1,8 @@
 /**
  * ============================================================================
- * 《修行局》V3.4.1 —— 叙事事实管线与真实多人玩法收口
+ * 《修行局》V3.4.2 —— 叙事事实管线、发布闸门与文案体验基线
  * ============================================================================
- * 核心原则（V3.4.1）：
+ * 核心原则（V3.4.2）：
  *   先结算，后写文。先写账本，后写小说。
  *   玩家行动 → IntentParser 识别意图 → TurnResolver 本地确定结果/代价/时间/
  *   关系/世界变化 → StateDelta 写入账本与场景 → ChoiceFactory 本地生成下一轮选项
@@ -74,7 +74,7 @@ Story.createRng = function (seed, sub) {
  * §1 常量：七枚开界骰 / 地貌 / 天道 / 人格 / AI 同伴模板
  * ============================================================ */
 
-Story.VERSION = '3.4.1';
+Story.VERSION = '3.4.2';
 
 /** V3.3 回合状态机阶段（Narration Transaction） */
 Story.TURN_PHASES = ['collecting', 'locked', 'resolving', 'awaiting_narration', 'narration_failed', 'published'];
@@ -288,6 +288,7 @@ Story.createEmptyState = function (seed) {
       recentSummary: '',
       recentCanonicalSummaries: [],
       recentNarrations: [],
+      narrativeQualityHistory: [],
       chronicle: [],
       recentMotifs: [],
       recentChoiceFingerprints: [],
@@ -336,7 +337,7 @@ Story.createEmptyState = function (seed) {
       lastSemanticRepair: null,
       lastNarrationObservation: null,
     },
-    settings: { timePreference: '顺其自然', narrativePace: '常规', mode: 'novel', pvpMode: 'dramatic', developerMode: false, showResolutionEcho: true },
+    settings: { timePreference: '顺其自然', narrativePace: '常规', narrativeProfile: 'immersive', mode: 'novel', pvpMode: 'dramatic', developerMode: false, showResolutionEcho: true },
     finalLegacy: null,
   };
 };
@@ -368,6 +369,7 @@ Story.Migration.migrateToV32 = function (s) {
   if (!st.recentSummary) st.recentSummary = '';
   if (!st.recentCanonicalSummaries) st.recentCanonicalSummaries = [];
   if (!st.recentNarrations) st.recentNarrations = [];
+  if (!st.narrativeQualityHistory) st.narrativeQualityHistory = [];
   if (!st.chronicle) st.chronicle = [];
   if (!st.recentMotifs) st.recentMotifs = [];
   if (!st.recentChoiceFingerprints) st.recentChoiceFingerprints = [];
@@ -464,6 +466,7 @@ Story.Migration.migrateToV32 = function (s) {
   if (!s.settings) s.settings = {};
   if (s.settings.timePreference === undefined) s.settings.timePreference = '顺其自然';
   if (!s.settings.narrativePace) s.settings.narrativePace = '常规';
+  if (!s.settings.narrativeProfile) s.settings.narrativeProfile = 'immersive';
   if (!s.settings.mode) s.settings.mode = 'novel';
   if (!s.settings.pvpMode) s.settings.pvpMode = 'dramatic';
   if (s.settings.developerMode === undefined) s.settings.developerMode = false;
@@ -686,6 +689,7 @@ Story.createSession = async function (config) {
   });
 
   if (config.narrativePace) state.settings.narrativePace = config.narrativePace;
+  if (config.narrativeProfile) state.settings.narrativeProfile = config.narrativeProfile;
   if (config.pvpMode) state.settings.pvpMode = config.pvpMode;
 
   // V3.3.2：若指定 skipOpening，跳过开局生成（等待 Director 投票后激活）
@@ -695,10 +699,11 @@ Story.createSession = async function (config) {
   return state;
 };
 
-Story.startGame = async function (seed, playerSetup) {
+Story.startGame = async function (seed, playerSetup, settings) {
   const player = Object.assign({}, playerSetup, { id: 'lu', seatId: 'seat_0', controller: 'human' });
   const companions = Story.PRESET_COMPANIONS.map(function (tpl, i) { const c = Story._clone(tpl); c.seatId = 'seat_' + (i + 1); c.controller = 'bot'; return c; });
-  return Story.createSession({ seed: seed, actors: [player].concat(companions) });
+  settings = settings || Story.loadSettings() || {};
+  return Story.createSession({ seed: seed, actors: [player].concat(companions), narrativePace: settings.narrativePace, narrativeProfile: settings.narrativeProfile });
 };
 
 /** 生成开局（V3.3 事务化）：创建场景 → 开局裁决 → 开局选项 → pendingResolution → awaiting_narration → AI → 提交。AI 失败停在 awaiting_narration，不调用离线兜底。 */
@@ -1181,6 +1186,8 @@ Story.regenerateChapter = async function () {
   s.currentChapter.chapter = chapter.chapter;
   s.currentChapter.endingImage = chapter.endingImage || s.currentChapter.endingImage;
   s.currentChapter.provenance = chapter.provenance;
+  s.currentChapter.narrativeMetrics = Story._clone(chapter.narrativeMetrics || null);
+  if (chapter.narrativeMetrics) s.narrativeQualityHistory = (s.narrativeQualityHistory || []).concat([Story._clone(chapter.narrativeMetrics)]).slice(-20);
   s.currentChapter.renderVersion = (s.currentChapter.renderVersion || 0) + 1;
   Story.snapshotRng(state);
   return s.currentChapter;
@@ -4932,6 +4939,30 @@ Story.Agent._relatesToGoal = function (actor, choice) {
 
 Story.Narration = Story.Narration || {};
 
+/* V3.4.3：文案档位只调整表现预算，不改变任何本地裁决事实。 */
+Story.Narration.PROSE_PROFILES = {
+  concise: {
+    id: 'concise-v1', label: '凝练', minScale: 0.85, idealScale: 0.88, maxScale: 0.90,
+    paragraphMin: 3, paragraphMax: 4, publishRatio: 0.72,
+  },
+  balanced: {
+    id: 'balanced-v1', label: '均衡', minScale: 1, idealScale: 1, maxScale: 1,
+    paragraphMin: 4, paragraphMax: 5, publishRatio: 0.78,
+  },
+  immersive: {
+    id: 'immersive-v1', label: '沉浸', minScale: 1.10, idealScale: 1.15, maxScale: 1.15,
+    paragraphMin: 5, paragraphMax: 6, publishRatio: 0.78,
+  },
+};
+
+Story.Narration.resolveProseProfile = function (stateOrSettings) {
+  var settings = stateOrSettings && stateOrSettings.settings ? stateOrSettings.settings : (stateOrSettings || {});
+  var key = settings.narrativeProfile || 'immersive';
+  if (!Story.Narration.PROSE_PROFILES[key]) key = 'immersive';
+  var profile = Story.Narration.PROSE_PROFILES[key];
+  return Object.assign({ key: key }, profile);
+};
+
 Story.Narration.NUMERALS = ['零','一','二','三','四','五','六','七','八','九'];
 
 Story.Narration.toChineseNum = function (n) {
@@ -5176,22 +5207,35 @@ Story.Narration.buildQualityPlan = function (state, contract, projectedState) {
     var fact = facts.find(function (candidate) { return candidate.factId === id; });
     return fact && fact.actorId;
   }).filter(Boolean);
-  var humanCount = new Set(facts.map(function (fact) { return fact.actorId; })).size;
+  var humanCount = Math.max(1, new Set(facts.map(function (fact) { return fact.actorId; })).size);
   var factCount = facts.length + interactions.length;
-  var min = humanCount <= 1 ? 260 : (humanCount === 2 ? 420 : (humanCount === 3 ? 600 : 760));
-  var ideal = humanCount <= 1 ? 600 : (humanCount === 2 ? 850 : (humanCount === 3 ? 1100 : 1400));
-  var max = humanCount <= 1 ? 900 : (humanCount === 2 ? 1200 : (humanCount === 3 ? 1500 : 1800));
+  var publishBase = humanCount <= 1 ? 260 : (humanCount === 2 ? 420 : (humanCount === 3 ? 600 : 760));
+  var baseMin = humanCount <= 1 ? 450 : (humanCount === 2 ? 650 : (humanCount === 3 ? 850 : 1050));
+  var baseIdeal = humanCount <= 1 ? 650 : (humanCount === 2 ? 900 : (humanCount === 3 ? 1150 : 1450));
+  var baseMax = humanCount <= 1 ? 850 : (humanCount === 2 ? 1200 : (humanCount === 3 ? 1500 : 1800));
+  var profile = Story.Narration.resolveProseProfile(state);
+  var sequenceCount = facts.filter(function (fact) { return fact.actionSequence && (fact.actionSequence.transitions || []).length; }).length;
+  var costCount = facts.filter(function (fact) { return fact.costs && fact.costs.length; }).length;
+  var complexityBonus = Math.min(250, interactions.length * 75 + sequenceCount * 75 + costCount * 30 + Math.max(0, factCount - humanCount) * 25);
+  var min = Math.round(baseMin * profile.minScale + complexityBonus * 0.35);
+  var ideal = Math.round(baseIdeal * profile.idealScale + complexityBonus);
+  var max = Math.round(baseMax * profile.maxScale + Math.min(300, complexityBonus));
+  var publishFloor = Math.max(publishBase, Math.round(min * profile.publishRatio));
   var memory = state.story.narrativeStyleMemory || {};
   var openingMode = Story.Narration._chooseOpeningMode(memory);
   var endingModes = ['consequence', 'unfinished_action', 'character_decision', 'relationship_crack', 'next_window', 'object_change', 'short_dialogue', 'scene_shift'];
   var endingMode = endingModes.find(function (mode) { return (memory.recentEndingModes || []).slice(-2).indexOf(mode) < 0; }) || endingModes[(memory.recentEndingModes || []).length % endingModes.length];
   var paragraphPlan = [];
   if (primary.length) paragraphPlan.push({ role: 'hook', factIds: primary, purpose: '从主冲突或具体动作切入，避免模板化天气开场。' });
-  if (secondary.length) paragraphPlan.push({ role: 'collision', factIds: secondary.slice(0, 1).concat(interactions.map(function (fact) { return fact.factId; })), purpose: '呈现行动之间的碰撞、协作或互相破坏。' });
+  if (secondary.length || interactions.length) paragraphPlan.push({ role: 'collision', factIds: secondary.slice(0, 1).concat(interactions.map(function (fact) { return fact.factId; })), purpose: '呈现行动之间的碰撞、协作或互相破坏。' });
+  if (interactions.length || ranked[0] && ranked[0].weight >= 5) paragraphPlan.push({ role: 'escalation', factIds: primary.concat(interactions.map(function (fact) { return fact.factId; })), purpose: '让动作引起即时反应，使冲突在同一空间内升级而非停在说明。' });
   if (secondary.length > 1 || montage.length) paragraphPlan.push({ role: 'parallel', factIds: secondary.slice(1).concat(montage), purpose: '合并并行行动，确保每名真人仍有可见因果。' });
   paragraphPlan.push({ role: 'consequence', factIds: primary.concat(secondary), purpose: '落到结果、代价、位置或关系变化，留下具体下一步。' });
+  if (profile.key === 'immersive' || factCount >= 5) paragraphPlan.push({ role: 'aftermath', factIds: primary.concat(secondary), purpose: '用一个具体物件、动作或短对白收束余波，不使用抽象悬念。' });
+  var desiredParagraphCount = Math.max(profile.paragraphMin, Math.min(profile.paragraphMax, paragraphPlan.length));
   return {
-    qualityPlanVersion: '1.0',
+    qualityPlanVersion: '1.1',
+    proseProfile: { key: profile.key, id: profile.id, label: profile.label },
     primaryFactIds: primary,
     secondaryFactIds: secondary,
     montageFactIds: montage,
@@ -5199,12 +5243,69 @@ Story.Narration.buildQualityPlan = function (state, contract, projectedState) {
     focalConflict: primary.length ? ((facts.find(function (fact) { return fact.factId === primary[0]; }) || {}).actionText || '') : '',
     openingMode: openingMode,
     endingMode: endingMode,
-    paragraphPlan: paragraphPlan.slice(0, 6),
+    paragraphPlan: paragraphPlan.slice(0, profile.paragraphMax),
+    desiredParagraphCount: desiredParagraphCount,
     dialoguePlan: interactions.length ? ['只在冲突、试探、决定或信息交换处使用对白。'] : ['对白可省略，优先呈现具体动作。'],
-    targetLength: { minChars: min, idealChars: ideal + Math.min(250, Math.max(0, factCount - 3) * 50), maxChars: max + Math.min(300, Math.max(0, factCount - 4) * 75) },
-    styleRules: { concreteActionPerParagraph: true, maxDominantImagesPerParagraph: 1, avoidReportLikeSegments: true },
+    targetLength: { publishFloorChars: publishFloor, minChars: min, idealChars: ideal, maxChars: Math.max(max, ideal + 150) },
+    styleRules: { concreteActionPerParagraph: true, actionReactionConsequence: true, maintainSpatialContinuity: true, varySentenceRhythm: true, maxDominantImagesPerParagraph: 1, avoidReportLikeSegments: true },
     avoidPatterns: ['细雨如丝', '夜色如墨', '暗流涌动', '命运交织', '仿佛有什么在注视'].concat((memory.recentOpeningPhrases || []).slice(-5)),
     projectedScene: projectedState && projectedState.scene ? Story._clone(projectedState.scene) : null,
+  };
+};
+
+/* 结构化叙事包只携带公开事实；AI 负责表达，不再从大段 brief 中猜本轮重点。 */
+Story.Narration.buildNarrativePacket = function (state, contract, qualityPlan, projectedState) {
+  contract = contract || {};
+  qualityPlan = qualityPlan || {};
+  var facts = (contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'action'; }).map(function (fact) {
+    return {
+      factId: fact.factId,
+      actorId: fact.actorId,
+      actorName: fact.actorName,
+      actionType: fact.actionType,
+      actionText: fact.actionText,
+      source: fact.source,
+      targetId: fact.targetId,
+      targetName: fact.targetName,
+      outcome: fact.outcome,
+      outcomeLabel: fact.outcomeLabel,
+      requiredMeaning: Story._clone(fact.requiredMeaning || []),
+      gains: Story._clone(fact.gains || []),
+      costs: Story._clone(fact.costs || []),
+      actionSequence: Story._clone(fact.actionSequence || null),
+      claims: Story._clone(fact.claims || []),
+      targetResolution: Story._clone(fact.targetResolution || {}),
+      consequencePolicy: Story._clone(fact.consequencePolicy || {}),
+      agencyPolicy: Story._clone(fact.agencyPolicy || {}),
+    };
+  });
+  var interactions = (contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'interaction'; }).map(function (fact) {
+    return {
+      factId: fact.factId,
+      interactionType: fact.interactionType,
+      actorIds: Story._clone(fact.actorIds || []),
+      actorNames: Story._clone(fact.actorNames || []),
+      targetId: fact.targetId || '',
+      requiredMeaning: Story._clone(fact.requiredMeaning || []),
+    };
+  });
+  return {
+    packetVersion: '1.0',
+    turnId: contract.turnId || '',
+    proseProfile: Story._clone(qualityPlan.proseProfile || {}),
+    targetLength: Story._clone(qualityPlan.targetLength || {}),
+    desiredParagraphCount: qualityPlan.desiredParagraphCount || (qualityPlan.paragraphPlan || []).length,
+    paragraphPlan: Story._clone(qualityPlan.paragraphPlan || []),
+    openingMode: qualityPlan.openingMode || 'action',
+    endingMode: qualityPlan.endingMode || 'consequence',
+    scene: Story._clone(projectedState && projectedState.scene || contract.canonicalScene || {}),
+    actorLocations: Story._clone(projectedState && projectedState.actors || contract.canonicalScene && contract.canonicalScene.actorLocations || []),
+    facts: facts,
+    interactions: interactions,
+    entityWhitelist: Story._clone(contract.entityWhitelist || []),
+    actorWhitelist: Story._clone(contract.actorWhitelist || []),
+    previousTurnSummary: contract.previousTurnSummary || '',
+    avoidPatterns: Story._clone(qualityPlan.avoidPatterns || []),
   };
 };
 
@@ -5230,6 +5331,8 @@ Story.Narration.buildSystemPrompt = function () {
     '一名真人只能尝试影响另一名真人，不能替对方接受交易、移动、改变立场、放弃行动或做出选择； contested interaction 必须写成尝试与裁决结果。',
     '不得复述上一章。previousTurnSummary 只用于理解承接关系，不是可复制的正文。',
     '围绕一个主要冲突组织章节；优先使用动作和具体物件，少写抽象总结，不要逐项汇报玩家行动；对白只用于冲突、试探、决定和信息交换。',
+    '以 NarrativePacket 为本章写作蓝图。篇幅应靠近 idealChars，不要把 publishFloorChars 当作目标；段落应形成“动作→即时反应→具体后果”的连续链。',
+    '保持人物在同一场景中的空间连续性，交替使用长短句，每段至少有一个可感知变化；不要把 factId 或审计清单写进正文。',
     '遵守 qualityPlan 的段落职责、开场和结尾模式；避免连续天气开场、模板化意象、每段都以角色姓名开头和与上一章复制。',
     '只返回严格 JSON 对象 {title, chapter, dialogues, endingImage, audit}，不要 Markdown，不要解释，不要返回状态字段；audit 只供服务端验收。',
     'audit 必须尽量列出 coveredFactIds、coveredInteractionIds、mentionedEntities、mentionedLocations、assertedPersistentClaims、openingMode。',
@@ -5243,7 +5346,11 @@ Story.Narration.buildUserPrompt = function (ctx) {
     '错误：' + (correction.previousErrors || []).map(function (error, index) { return (index + 1) + '. ' + (error.message || error.code || error); }).join(' '),
     '请逐条执行 requiredRepairs，依据 mustRenderFacts 重新生成完整章节。保留上一版已正确落实的事实，不得改动本地结果。不要解释错误。',
   ].join('\n') + '\n\n' : '';
-  return prefix + '请按以下顺序处理：NarrativeQualityPlan → mustRenderFacts → mandatoryInteractions → canonicalScene/actorLocations → consequencePolicy → entity whitelist → previous public summary → style memory/avoid patterns → protocolCorrection。\n本回合叙事上下文 JSON：\n' + JSON.stringify(ctx);
+  var plan = ctx && (ctx.qualityPlan || ctx.brief && ctx.brief.qualityPlan) || {};
+  var target = plan.targetLength || {};
+  return prefix + '请按以下顺序处理：NarrativePacket → NarrativeQualityPlan → mustRenderFacts → mandatoryInteractions → canonicalScene/actorLocations → consequencePolicy → entity whitelist → previous public summary → style memory/avoid patterns → protocolCorrection。\n' +
+    '本章请写到约 ' + (target.idealChars || 900) + ' 字，建议 ' + (plan.desiredParagraphCount || 4) + ' 段；完整覆盖事实后再润色动作、反应与余波。输出前自检 coveredFactIds 和 coveredInteractionIds，但不要在正文展示 ID。\n' +
+    '本回合叙事上下文 JSON：\n' + JSON.stringify(ctx);
 };
 
 Story.Narration._debugSink = null;
@@ -5521,6 +5628,56 @@ Story.Narration.validateEntityAudit = function (narration, contract) {
   return null;
 };
 
+/* 文案体验指标只做结构测量，避免继续堆叠易误伤的风格正则。 */
+Story.Narration.measureProseExperience = function (narration, qualityPlan) {
+  var parsed = Story.Provider.parseNarrationResponse(narration);
+  var text = String(parsed && parsed.chapter || '');
+  var compact = text.replace(/\s/g, '');
+  var paragraphs = text.split(/\n+/).map(function (part) { return part.trim(); }).filter(Boolean);
+  var sentences = text.split(/[。！？!?；;]+/).map(function (part) { return part.replace(/\s/g, '').trim(); }).filter(Boolean);
+  var paragraphLengths = paragraphs.map(function (part) { return part.replace(/\s/g, '').length; });
+  var sentenceLengths = sentences.map(function (part) { return part.length; });
+  var average = function (values) { return values.length ? values.reduce(function (sum, value) { return sum + value; }, 0) / values.length : 0; };
+  var avgSentenceChars = average(sentenceLengths);
+  var variance = sentenceLengths.length ? average(sentenceLengths.map(function (value) { return Math.pow(value - avgSentenceChars, 2); })) : 0;
+  var sentenceLengthVariation = avgSentenceChars ? Math.sqrt(variance) / avgSentenceChars : 0;
+  var quoteMatches = text.match(/“[^”]*”|"[^"]*"/g) || [];
+  var dialogueChars = quoteMatches.reduce(function (sum, quote) { return sum + quote.replace(/[“”"\s]/g, '').length; }, 0);
+  var target = qualityPlan && qualityPlan.targetLength || {};
+  var floor = target.publishFloorChars || target.minChars || 0;
+  var lengthStatus = compact.length < floor ? 'below_floor' : (compact.length < (target.minChars || 0) ? 'below_target' : (target.maxChars && compact.length > target.maxChars ? 'above_target' : 'target'));
+  var desiredParagraphCount = qualityPlan && qualityPlan.desiredParagraphCount || (qualityPlan && qualityPlan.paragraphPlan || []).length || 3;
+  var maxParagraphShare = compact.length && paragraphLengths.length ? Math.max.apply(Math, paragraphLengths) / compact.length : 0;
+  var warnings = [];
+  var score = 100;
+  if (lengthStatus === 'below_floor') { warnings.push('BELOW_PUBLISH_FLOOR'); score -= 35; }
+  else if (lengthStatus === 'below_target') { warnings.push('BELOW_TARGET_LENGTH'); score -= 15; }
+  else if (lengthStatus === 'above_target') { warnings.push('ABOVE_TARGET_LENGTH'); score -= 10; }
+  if (paragraphs.length < desiredParagraphCount) { warnings.push('PARAGRAPH_COUNT_BELOW_TARGET'); score -= Math.min(18, (desiredParagraphCount - paragraphs.length) * 6); }
+  if (maxParagraphShare > 0.58 && paragraphs.length > 1) { warnings.push('PARAGRAPH_IMBALANCE'); score -= 10; }
+  if (sentenceLengths.length >= 5 && sentenceLengthVariation < 0.28) { warnings.push('LOW_SENTENCE_VARIETY'); score -= 8; }
+  if (compact.length && dialogueChars / compact.length > 0.45) { warnings.push('DIALOGUE_HEAVY'); score -= 8; }
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  return {
+    metricsVersion: '1.0',
+    proseProfile: qualityPlan && qualityPlan.proseProfile || null,
+    charCount: compact.length,
+    paragraphCount: paragraphs.length,
+    sentenceCount: sentences.length,
+    averageParagraphChars: Math.round(average(paragraphLengths)),
+    maxParagraphShare: Number(maxParagraphShare.toFixed(3)),
+    averageSentenceChars: Number(avgSentenceChars.toFixed(1)),
+    sentenceLengthVariation: Number(sentenceLengthVariation.toFixed(3)),
+    dialogueRatio: compact.length ? Number((dialogueChars / compact.length).toFixed(3)) : 0,
+    lengthStatus: lengthStatus,
+    targetLength: Story._clone(target),
+    desiredParagraphCount: desiredParagraphCount,
+    warnings: warnings,
+    score: score,
+    grade: score >= 90 ? 'A' : (score >= 75 ? 'B' : (score >= 60 ? 'C' : 'D')),
+  };
+};
+
 Story.Narration.validateChapterCompleteness = function (narration, contract, options) {
   options = options || {};
   var parsed = Story.Provider.parseNarrationResponse(narration);
@@ -5528,6 +5685,7 @@ Story.Narration.validateChapterCompleteness = function (narration, contract, opt
   var facts = (contract && contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'action'; });
   var actorCount = new Set(facts.map(function (fact) { return fact.actorId; })).size;
   var minimum = actorCount <= 1 ? 260 : (actorCount === 2 ? 420 : (actorCount === 3 ? 600 : 760));
+  if (options.qualityPlan && options.qualityPlan.targetLength && options.qualityPlan.targetLength.publishFloorChars) minimum = Math.max(minimum, options.qualityPlan.targetLength.publishFloorChars);
   var paragraphs = text.split(/\n+/).map(function (part) { return part.trim(); }).filter(Boolean);
   var minParagraphs = actorCount <= 1 ? 2 : (actorCount === 2 ? 3 : (actorCount === 3 ? 3 : 4));
   if (parsed.finishReason === 'length' || options.finishReason === 'length') return Story.Narration._violation('NARRATION_TRUNCATED', 'Provider 以 length 截断了章节', text);
@@ -5591,7 +5749,7 @@ Story.Narration.validateSemantic = function (state, narration, brief) {
     Story.Narration.validateConsequenceBudget(narration, contract),
     Story.Narration.validateEntityAudit(narration, contract),
     Story.Narration.validateClaimEvidence(narration, contract),
-    brief.enforcePublishGate ? Story.Narration.validateChapterCompleteness(narration, contract) : null,
+    brief.enforcePublishGate ? Story.Narration.validateChapterCompleteness(narration, contract, { qualityPlan: brief.qualityPlan }) : null,
   ];
   return checks.filter(Boolean);
 };
@@ -5601,7 +5759,7 @@ Story.Narration.validatePublishGate = function (state, narration, brief) {
   if (!contract) return null;
   var checks = [
     Story.Narration.validateTurnContractCompleteness(contract),
-    Story.Narration.validateChapterCompleteness(narration, contract, { finishReason: narration && narration.finishReason }),
+    Story.Narration.validateChapterCompleteness(narration, contract, { finishReason: narration && narration.finishReason, qualityPlan: brief && brief.qualityPlan }),
     Story.Narration.validateActionFacts(narration, contract),
     Story.Narration.validateInteractionFacts(narration, contract),
     Story.Narration.validatePlayerAgency(narration, contract),
@@ -5639,6 +5797,7 @@ Story.Narration.buildBrief = function (state, scene, envelope, directorPlan, sce
   var projectedState = pending.projectedState || { scene: sceneAfter, actors: [], worldTime: envelope && envelope.elapsedTime, publicThreads: Story.ThreadView.getPublicActiveThreads(state) };
   const turnContract = Story.Narration.buildTurnContract(state, envelope, directorPlan, sceneAfter);
   const qualityPlan = Story.Narration.buildQualityPlan(state, turnContract, projectedState);
+  const narrativePacket = Story.Narration.buildNarrativePacket(state, turnContract, qualityPlan, projectedState);
   const focal = (scene && scene.focalActorIds && scene.focalActorIds.length) ? scene.focalActorIds : (state.actors[0] ? [state.actors[0].id] : []);
   const flags = (w.worldBible && w.worldBible.flags) || {};
   const toneTags = [];
@@ -5733,10 +5892,11 @@ Story.Narration.buildBrief = function (state, scene, envelope, directorPlan, sce
     // V3.3.2：Director 叙事引导——告知 AI 当前卷纲与节拍目标
     director: directorGuide,
     qualityPlan: qualityPlan,
+    narrativePacket: narrativePacket,
     projectedState: projectedState,
     style: {
       proseLength: qualityPlan.targetLength.minChars + '-' + qualityPlan.targetLength.maxChars + ' Chinese characters',
-      paragraphCount: String(Math.max(2, Math.min(6, qualityPlan.paragraphPlan.length))),
+      paragraphCount: String(qualityPlan.desiredParagraphCount || Math.max(2, Math.min(6, qualityPlan.paragraphPlan.length))),
       focalConflictCount: 1,
       noSummaryTone: true,
       noGenericObserver: true,
@@ -5771,13 +5931,15 @@ Story.Narration.buildPublicContext = function (state, brief, projectedState, qua
     if (delta.op === 'UPDATE_RELATION' && delta.payload && delta.payload.publicHint) turnEvents.push(delta.payload.publicHint);
     if (delta.op === 'ADVANCE_TIME' && delta.payload) turnEvents.push('时间流逝：' + delta.payload.value + delta.payload.unit);
   });
+  var resolvedQualityPlan = Story._clone(qualityPlan || brief.qualityPlan || null);
+  var narrativePacket = Story._clone(brief.narrativePacket || Story.Narration.buildNarrativePacket(state, contract, resolvedQualityPlan, projectedState || brief.projectedState));
   var publicBrief = {
     chapterIndex: brief.chapterIndex, world: Story._clone(brief.world), scene: Story._clone(brief.scene),
     focalActors: Story._clone(brief.focalActors || []), narrationBeats: (contract.mustRenderFacts || []).reduce(function (out, fact) {
       return out.concat((fact.requiredMeaning || []).concat(fact.gains || [], fact.costs || []));
     }, []), coverageAnchors: chosenActions, isOpening: !!brief.isOpening,
     openingAnchors: Story._clone(brief.openingAnchors || []), openingAnchorGroups: Story._clone(brief.openingAnchorGroups || {}),
-    turnContract: contract, activeThreads: publicThreads, qualityPlan: Story._clone(qualityPlan || brief.qualityPlan || null),
+    turnContract: contract, activeThreads: publicThreads, qualityPlan: resolvedQualityPlan, narrativePacket: narrativePacket,
     projectedState: Story._clone(projectedState || brief.projectedState || null), style: Story._clone(brief.style || {}),
     previousTurnSummary: contract.previousTurnSummary || '', repetitionPolicy: contract.repetitionPolicy || {},
   };
@@ -5792,6 +5954,7 @@ Story.Narration.buildPublicContext = function (state, brief, projectedState, qua
   });
   return {
     mode: 'turn', brief: publicBrief, chosenActions: chosenActions, turnEvents: turnEvents,
+    narrativePacket: narrativePacket, qualityPlan: resolvedQualityPlan,
     narrationBeats: publicBrief.narrationBeats, turnContract: contract,
     mandatoryInteractions: (contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'interaction'; }), activeThreads: publicThreads,
     world: { name: publicBrief.world && publicBrief.world.name, year: publicBrief.world && publicBrief.world.year, worldBibleSummary: (((state.world || {}).worldBible || {}).rules || []).join(''), activeWorldHooks: ((state.world || {}).activeWorldHooks || []).slice(-12), publicFacts: ((state.world || {}).publicFacts || []).slice(-8), publicRumors: ((state.world || {}).publicRumors || []).slice(-8) },
@@ -5819,6 +5982,8 @@ Story.Narration.assembleFromAI = function (state, scene, envelope, narration) {
   } else {
     chapterSummary = Story.Narration._summary(state, scene, action, envelope.narrationBeats || []);
   }
+  var qualityPlan = state && state.story && state.story.pendingResolution && state.story.pendingResolution.qualityPlan || null;
+  var narrativeMetrics = Story.Narration.measureProseExperience(parsed, qualityPlan);
   return {
     title: title,
     chapter: chapter,
@@ -5828,6 +5993,7 @@ Story.Narration.assembleFromAI = function (state, scene, envelope, narration) {
     dialogues: Array.isArray(parsed.dialogues) ? parsed.dialogues : [],
     provenance: provenance,
     narrationStatus: 'ok',
+    narrativeMetrics: narrativeMetrics,
   };
 };
 
@@ -6006,10 +6172,12 @@ Story.Narration.applyNarration = function (state, chapter, envelope, isOpening) 
     dialogues: Array.isArray(chapter.dialogues) ? chapter.dialogues : [],
     provenance: chapter.provenance || 'offline-resolved',
     narrationStatus: chapter.narrationStatus || 'ok',
+    narrativeMetrics: Story._clone(chapter.narrativeMetrics || null),
     renderVersion: 0,
   };
   s.recentCanonicalSummaries = (s.recentCanonicalSummaries || []).concat([canonicalSummary]).slice(-8);
   s.recentNarrations = (s.recentNarrations || []).concat([{ title: chapter.title, chapter: chapter.chapter }]).slice(-4);
+  if (chapter.narrativeMetrics) s.narrativeQualityHistory = (s.narrativeQualityHistory || []).concat([Story._clone(chapter.narrativeMetrics)]).slice(-20);
   var qualityPlan = pending.qualityPlan || null;
   var memory = s.narrativeStyleMemory || {};
   memory.recentOpeningModes = (memory.recentOpeningModes || []).concat([qualityPlan && qualityPlan.openingMode || 'action']).slice(-5);
@@ -6921,6 +7089,7 @@ Story.saveSettings = function (settings) {
     model: (settings && settings.model) || '',
     temperature: (settings && typeof settings.temperature === 'number') ? settings.temperature : 0.8,
     narrativePace: (settings && settings.narrativePace) || '常规',
+    narrativeProfile: (settings && settings.narrativeProfile) || 'immersive',
     mode: (settings && settings.mode) || 'novel',
   };
   try { if (typeof localStorage !== 'undefined') localStorage.setItem(Story.SETTINGS_KEY, JSON.stringify(safe)); } catch (e) {}

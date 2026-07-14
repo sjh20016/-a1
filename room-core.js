@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * 《修行局》V3.4.1 — 房间协调器 + 权威联机视图（room-core.js）
+ * 《修行局》V3.4.2 — 房间协调器 + 权威联机视图（room-core.js）
  * ============================================================================
  * 职责：管理房间、席位、角色绑定、回合收集、机器人自动落子、统一结算。
  *   Story 只负责叙事，Room 负责秩序与隐私。
@@ -14,7 +14,7 @@
  *   - RoomView.getForSeat（按席位过滤隐私视图）
  *   - 本地存档与恢复
  *
- * V3.4.1 由 server/room-runtime.js 在服务端串行调用协调器，浏览器仅持有 RoomView。
+ * V3.4.2 由 server/room-runtime.js 在服务端串行调用协调器，浏览器仅持有 RoomView。
  * ============================================================================
  */
 const Room = {};
@@ -27,7 +27,7 @@ const Room = {};
     : (typeof globalThis !== 'undefined' ? globalThis.Story : null);
   if (!Story) throw new Error('story-core.js must be loaded before room-core.js');
 
-  Room.VERSION = '3.4.1';
+  Room.VERSION = '3.4.2';
   Room.MAX_SEATS = 4;
 
   /** 机器人策略模板（影响描述与未来权重，当前决策由 Story.aiChoose 执行） */
@@ -61,6 +61,7 @@ const Room = {};
       settings: {
         seed: config.seed || '',
         narrativePace: config.narrativePace || '常规',
+        narrativeProfile: config.narrativeProfile || 'immersive',
         allowCustomActions: config.allowCustomActions !== false,
         allowSpectators: !!config.allowSpectators,
         aiNarrationMode: config.aiNarrationMode || 'host-byok',  // host-byok | offline
@@ -271,6 +272,7 @@ const Room = {};
           seed: room.settings.seed || undefined,
           actors: actors,
           narrativePace: room.settings.narrativePace,
+          narrativeProfile: room.settings.narrativeProfile,
           pvpMode: room.settings.pvpMode,
         }); });
         room.storySession = storyState;
@@ -333,6 +335,7 @@ const Room = {};
           seed: room.settings.seed || undefined,
           actors: actors,
           narrativePace: room.settings.narrativePace,
+          narrativeProfile: room.settings.narrativeProfile,
           pvpMode: room.settings.pvpMode,
           skipOpening: true,
         }); });
@@ -542,7 +545,8 @@ const Room = {};
       if (!room.turn) room.turn = { turnId: '', round: 0, phase: 'idle', openedAt: 0, lockedAt: 0, submittedActorIds: [], actionsByActorId: {}, botStatusByActorId: {}, resolutionId: null };
       if (room.turn.lastError === undefined) room.turn.lastError = null;
       if (!room.eventLog) room.eventLog = [];
-      if (!room.settings) room.settings = { seed: '', narrativePace: '常规', allowCustomActions: true, allowSpectators: false, aiNarrationMode: 'host-byok', pvpMode: 'dramatic' };
+      if (!room.settings) room.settings = { seed: '', narrativePace: '常规', narrativeProfile: 'immersive', allowCustomActions: true, allowSpectators: false, aiNarrationMode: 'host-byok', pvpMode: 'dramatic' };
+      if (!room.settings.narrativeProfile) room.settings.narrativeProfile = 'immersive';
       if (!room.settings.pvpMode) room.settings.pvpMode = 'dramatic';
       room._pending = null;
       // 恢复 Story RNG

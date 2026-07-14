@@ -1,11 +1,13 @@
 {
   "name": "xiuxianju-v3",
-  "version": "3.4.1",
-  "description": "多人互动跑团文字小说：叙事事务化、AI 必需的稳定引擎（V3.3）",
+  "version": "3.4.2",
+  "description": "多人修仙叙事游戏：本地确定性裁决、AI 文案渲染与发布闸门（V3.4.2）",
   "private": true,
   "scripts": {
-    "test": "npm run test:core && npm run test:room && npm run test:regression && npm run test:ai && npm run test:dom && npm run test:v32 && npm run test:transaction && npm run test:experience && npm run test:director && npm run test:director-clean && npm run test:v341 && npm run test:v342 && npm run test:server",
+    "test": "npm run test:core && npm run test:room && npm run test:regression && npm run test:ai && npm run test:dom && npm run test:v32 && npm run test:transaction && npm run test:experience && npm run test:director && npm run test:director-clean && npm run test:v341 && npm run test:v342 && npm run test:v343 && npm run test:server",
     "server": "node server/index.js",
+    "check:syntax": "node --check story-core.js && node --check room-core.js && node --check server/index.js && node --check server/room-runtime.js && node --check server/ai-provider.js",
+    "simulate": "node scripts/simulate-baseline.js",
     "test:core": "node test-v3.js",
     "test:room": "node test-v31.js",
     "test:regression": "node test-regressions.js",
@@ -19,6 +21,7 @@
     "test:v341": "node test-v341-human-controller.js && node test-v341-relationship-init.js && node test-v341-dynamic-target-resolution.js && node test-v341-pvp-interaction.js && node test-v341-cooperation-interaction.js && node test-v341-repeated-rest.js && node test-v341-repeated-pvp.js && node test-v341-unified-time.js && node test-v341-long-action-gating.js && node test-v341-turn-contract.js && node test-v341-action-fact-validation.js && node test-v341-novelty-validation.js && node test-v341-canonical-claims.js && node test-v341-temporal-validation.js && node test-v341-hidden-thread-privacy.js && node test-v341-scene-destination.js && node test-v341-majority-movement.js && node test-v341-auto-semantic-repair.js && node test-v341-extreme-behavior.js",
     "test:v342": "node test-v342-narrative-gates.js && node test-v342-publish-gate.js && node test-server-v342-provider-finish-reason.js && node test-v342-three-player-10round.js --quiet",
     "test:v342:three-player": "node test-v342-three-player-10round.js",
+    "test:v343": "node test-v343-prose-experience.js",
     "test:server": "node test-server/test-server-protocol.js && node test-server/test-server-room-flow.js && node test-server/test-server-narration-failed.js && node test-server/test-server-restart-restore.js && node test-server/test-server-persist-before-ai.js && node test-server/test-server-concurrent-rooms.js && node test-server/test-server-semantic-failure.js"
   },
   "dependencies": {

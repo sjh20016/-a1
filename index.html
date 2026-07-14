@@ -334,7 +334,7 @@ input,textarea,select{font-family:inherit;color:var(--text)}
 <!-- ============== 开界仪式屏 ============== -->
 <div class="screen active" id="screen-intro">
   <div class="intro-title">修行局</div>
-  <div class="intro-sub">V3.4.1 · 叙事事实契约与真实多人玩法</div>
+  <div class="intro-sub">V3.4.2 · 叙事验收收口与沉浸文案体验</div>
   <div class="intro-core">
     一名玩家与三名 AI 修士，共同进入由<b>七枚开界骰</b>生成的修仙世界。<br>
     每一回合读一段小说，做一次选择，看见世界如何回应。<br>
@@ -395,7 +395,7 @@ input,textarea,select{font-family:inherit;color:var(--text)}
     <button class="btn ghost sm" id="btn-quick-solo" style="display:none">快速单人（V3）</button>
   </div>
 
-  <div class="intro-foot">V3.4.1 · 服务器权威裁决：AI 失败时行动与世界状态保持锁定，等待房主重试</div>
+  <div class="intro-foot">V3.4.2 · 服务器权威裁决：事实、完整性与文案体验通过发布闸门后才提交</div>
 </div>
 
 <!-- ============== V3.4.1 真实联机最小界面 ============== -->
@@ -654,6 +654,15 @@ input,textarea,select{font-family:inherit;color:var(--text)}
         </select>
       </div>
       <div class="form-row">
+        <label>文案档位</label>
+        <select id="set-profile">
+          <option value="concise">凝练（更短、更直接）</option>
+          <option value="balanced">均衡（完整而克制）</option>
+          <option value="immersive" selected>沉浸（更充分的场面与余波）</option>
+        </select>
+        <div class="hint">只调整章节篇幅与表现密度，不改变本地裁决结果。</div>
+      </div>
+      <div class="form-row">
         <label>API 诊断</label>
         <div class="api-diagnostic" id="set-ai-status">尚未检测。</div>
       </div>
@@ -702,7 +711,7 @@ input,textarea,select{font-family:inherit;color:var(--text)}
  * V3 UI 控制层
  * ============================================================ */
 const UI = {
-  settings: { aiOn:0, base:'', model:'gpt-4o-mini', temperature:0.8, narrativePace:'常规', mode:'novel' },
+  settings: { aiOn:0, base:'', model:'gpt-4o-mini', temperature:0.8, narrativePace:'常规', narrativeProfile:'immersive', mode:'novel' },
   selectedChoiceId: null,
   generationRequestId: 0,
   isGenerating: false,
@@ -948,7 +957,7 @@ UI.startGame = async function () {
   };
   UI.showComputing(true);
   try {
-    await Story.startGame(seed, setup);
+    await Story.startGame(seed, setup, UI.settings);
     UI.switchScreen('game');
     UI.renderChapter();
   } catch (e) {
@@ -1447,6 +1456,7 @@ UI.openSettings = function () {
   document.getElementById('set-model').value = UI.settings.model || 'gpt-4o-mini';
   document.getElementById('set-temp').value = UI.settings.temperature;
   document.getElementById('set-pace').value = UI.settings.narrativePace || '常规';
+  document.getElementById('set-profile').value = UI.settings.narrativeProfile || 'immersive';
   UI.renderAIStatus(Story.getAIStatus());
   document.getElementById('set-modal').classList.add('show');
 };
@@ -1456,14 +1466,16 @@ UI.saveSettings = function () {
   UI.settings.model = document.getElementById('set-model').value.trim() || 'gpt-4o-mini';
   UI.settings.temperature = parseFloat(document.getElementById('set-temp').value) || 0.8;
   UI.settings.narrativePace = document.getElementById('set-pace').value;
+  UI.settings.narrativeProfile = document.getElementById('set-profile').value || 'immersive';
   var enteredKey = document.getElementById('set-key').value.trim();
   if (enteredKey) Story.setApiKey(enteredKey); // 留空时保留本次会话已有 Key
-  Story.saveSettings({ aiOn: UI.settings.aiOn, base: UI.settings.base, model: UI.settings.model, temperature: UI.settings.temperature, narrativePace: UI.settings.narrativePace, mode: 'novel' });
+  Story.saveSettings({ aiOn: UI.settings.aiOn, base: UI.settings.base, model: UI.settings.model, temperature: UI.settings.temperature, narrativePace: UI.settings.narrativePace, narrativeProfile: UI.settings.narrativeProfile, mode: 'novel' });
   UI.syncAI();
-  if (Story.state) { Story.state.settings.narrativePace = UI.settings.narrativePace; }
+  if (Story.state) { Story.state.settings.narrativePace = UI.settings.narrativePace; Story.state.settings.narrativeProfile = UI.settings.narrativeProfile; }
   // 房间模式：同步房间设置
   if (UI.room) {
     UI.room.settings.narrativePace = UI.settings.narrativePace;
+    UI.room.settings.narrativeProfile = UI.settings.narrativeProfile;
     UI.room.settings.aiNarrationMode = UI.settings.aiOn ? 'host-byok' : 'offline';
   }
   document.getElementById('set-modal').classList.remove('show');
@@ -1477,6 +1489,7 @@ UI.loadSettings = function () {
     UI.settings.model = s.model || 'gpt-4o-mini';
     UI.settings.temperature = (typeof s.temperature === 'number') ? s.temperature : 0.8;
     UI.settings.narrativePace = s.narrativePace || '常规';
+    UI.settings.narrativeProfile = s.narrativeProfile || 'immersive';
   }
 };
 UI._chatEndpoint = function (base) {
@@ -1854,6 +1867,7 @@ UI.createRoom = function () {
     mode: mode,
     seed: seed,
     narrativePace: UI.settings.narrativePace || '常规',
+    narrativeProfile: UI.settings.narrativeProfile || 'immersive',
   } });
   UI.viewerSeatId = UI.room.hostSeatId;
   // 直接用开界屏的立命信息绑定房主角色，免去大厅重复立命
@@ -2466,7 +2480,7 @@ UI.init = function () {
     document.getElementById('btn-online-create').addEventListener('click', function () {
       var name = (document.getElementById('online-name').value || '').trim() || '房主';
       var seed = (document.getElementById('seed-input').value || '').trim() || ('ONLINE-' + Date.now());
-      UI._onlineCall(OnlineClient.createRoom({ hostName: name, seed: seed }));
+      UI._onlineCall(OnlineClient.createRoom({ hostName: name, seed: seed, narrativeProfile: UI.settings.narrativeProfile || 'immersive' }));
     });
     document.getElementById('btn-online-join').addEventListener('click', function () {
       var name = (document.getElementById('online-name').value || '').trim() || '云游修士';

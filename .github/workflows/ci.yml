@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run check:syntax
+      - run: npm test
+      - run: npm run simulate -- --seed CI-V342 --turns 30 --quiet
+      - run: npm audit --omit=dev

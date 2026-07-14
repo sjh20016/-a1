@@ -156,7 +156,8 @@ class RoomRuntime {
     var hostName = String(payload.hostName || '').trim().slice(0, 40);
     if (!hostName) throw new ProtocolError('INVALID_PAYLOAD', 'hostName 不能为空');
     var roomCode = this.generateRoomCode();
-    var room = this.Room.coordinator.createRoom({ hostName: hostName, mode: 'online', seed: payload.seed || '' });
+    var profile = ['concise', 'balanced', 'immersive'].indexOf(payload.narrativeProfile) >= 0 ? payload.narrativeProfile : 'immersive';
+    var room = this.Room.coordinator.createRoom({ hostName: hostName, mode: 'online', seed: payload.seed || '', narrativeProfile: profile });
     room.roomCode = roomCode;
     var hostSeat = room.seats.find(function (seat) { return seat.seatId === room.hostSeatId; });
     hostSeat.controller.kind = 'remote-human';

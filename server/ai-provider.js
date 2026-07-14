@@ -20,7 +20,7 @@ async function callOpenAICompatible(config, ctx, Story) {
         { role: 'user', content: Story.Narration.buildUserPrompt(ctx) },
       ],
       temperature: config.aiTemperature == null ? 0.6 : config.aiTemperature,
-      max_tokens: config.aiMaxTokens || 2600,
+      max_tokens: config.aiMaxTokens || 4096,
     };
     if (config.aiJsonMode) requestBody.response_format = { type: config.aiJsonMode };
     var response = await fetch(endpointFor(config.aiBaseUrl), {

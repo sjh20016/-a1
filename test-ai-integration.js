@@ -64,6 +64,9 @@ async function main() {
         '陆知微继续睡觉，却在梦境中追上了反复回荡的钟声。钟声每近一寸，周围的雨幕便退开一层，他始终没有改变追寻声源的决定。',
         { text: '醒来时，他掌心多出一道具体可查的符痕；这一行动改变了同伴的判断，也让下一步追索有了明确方向。他将梦里的钟声节奏逐一记下，确认这场休息并非毫无所得。' },
         '他没有把梦里的声响解释成已经确定的事实，也没有替同伴决定下一步。陆知微收好记录，等候新的选择窗口，客栈里只剩下纸页翻动和逐渐清晰的呼吸声。雨水沿着檐角滴落，纸上的三个节拍却始终没有改变；这份具体记录足以让下一轮调查有迹可循，却不足以替任何人宣布答案，真相仍待查证。',
+        '天亮前，他又把三次钟响分别标在纸页边缘，并将醒来前后的呼吸、雨声和房门位置逐项对照。同伴只看见他完成记录，没有被迫接受他的判断；这一夜最终留下的是一份可继续核验的普通笔记，而不是旁白提前写定的结论。',
+        '窗纸逐渐发白时，陆知微把残剑移到桌案另一侧，确认剑身颤动与更鼓之间没有稳定对应。他划去一个过早的猜测，只保留可以在白日继续调查的时间点、方位和听觉差异。',
+        '最后一滴檐水落下，他合起纸页，没有宣称自己已经找到钟声源头。门仍关着，屋内众人的位置没有变化；下一轮若要追索，只能从这份公开记录和各自新的行动开始。',
       ],
       chapterSummary: '继续睡觉引出了梦钟符痕。',
       timePassed: { value: '1', unit: '日', reason: '梦中追索' },
@@ -96,7 +99,7 @@ async function main() {
   check('系统提示强制落实 chosenActions', captured && captured.body.messages[0].content.indexOf('chosenActions') >= 0);
   check('系统提示提醒 coverageAnchors 覆盖锚点', captured && captured.body.messages[0].content.indexOf('coverageAnchors') >= 0);
   check('用户消息包含自定义行动原文', captured && captured.body.messages[1].content.indexOf('继续睡觉并追逐梦中钟声') >= 0);
-  check('成功使用 API 正文而非离线模板', Story.state.story.currentChapter.title === '梦钟之后');
+  check('成功使用 API 正文而非离线模板', Story.state.story.currentChapter.title === '梦钟之后', Story.state.api.lastErrorCode + ' / ' + Story.state.api.lastErrorMessage);
   check('chapter 段落数组被合并为正文', typeof Story.state.story.currentChapter.chapter === 'string' && Story.state.story.currentChapter.chapter.indexOf('掌心多出') >= 0);
   check('API 成功状态可观察', Story.getAIStatus().state === 'success');
   check('DeepSeek 常见格式偏差被自动修复', Story.getAIStatus().message.indexOf('自动修复格式') >= 0);

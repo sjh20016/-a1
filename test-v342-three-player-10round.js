@@ -137,7 +137,7 @@ function renderChapter(ctx, round) {
 }
 
 async function main() {
-  const state = await Story.createSession({ seed: 'V342-THREE-REAL-PLAYERS', skipOpening: true, pvpMode: 'dramatic', actors: [
+  const state = await Story.createSession({ seed: 'V342-THREE-REAL-PLAYERS', skipOpening: true, pvpMode: 'dramatic', narrativeProfile: 'concise', actors: [
     { id: 'normal', name: '阿悟', seatId: 'seat_0', controller: 'human', identity: '谨慎调查者', daoPath: '阵修' },
     { id: 'aggressive', name: '阿萝', seatId: 'seat_1', controller: 'human', identity: '好战行者', daoPath: '剑修' },
     { id: 'imaginative', name: '阿客', seatId: 'seat_2', controller: 'human', identity: '跳脱散修', daoPath: '杂学' },

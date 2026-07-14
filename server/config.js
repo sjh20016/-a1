@@ -17,7 +17,7 @@ module.exports = {
   aiModel: process.env.AI_MODEL || '',
   aiTimeoutMs: numberFrom(process.env.AI_TIMEOUT_MS || 60000, 60000),
   aiTemperature: numberFrom(process.env.AI_TEMPERATURE || 0.6, 0.6),
-  aiMaxTokens: numberFrom(process.env.AI_MAX_TOKENS || 2600, 2600),
+  aiMaxTokens: numberFrom(process.env.AI_MAX_TOKENS || 4096, 4096),
   aiJsonMode: process.env.AI_JSON_MODE || 'json_object',
   aiSemanticRetry: numberFrom(process.env.AI_SEMANTIC_RETRY || 1, 1),
   narrationDebug: process.env.NARRATION_DEBUG === 'true',
