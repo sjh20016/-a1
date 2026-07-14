@@ -274,6 +274,8 @@ Story.createEmptyState = function (seed) {
       activeWorldHooks: [],
       factions: [],
       regions: [],
+      ruleState: null,
+      factionHistory: [],
     },
     actors: [],
     assets: [],                       // V3.3 Phase 3：AssetRegistry 资产登记表
@@ -301,12 +303,13 @@ Story.createEmptyState = function (seed) {
         recentDominantImages: [],
       },
       lastTurnRecordId: null,
+      stateVersion: 0,
       // V3.3 Narration Transaction：回合状态机 + 待提交裁决包
       turnPhase: 'collecting',     // collecting|locked|resolving|awaiting_narration|published
       pendingResolution: null,     // {turnId,envelope,actionsByActorId,botActions,sceneBefore,chapterIndexBefore,createdAt,retryCount,lastNarrationError}
       // V3.3.2 Director：卷纲导演系统
       director: {
-        phase: 'inactive',         // inactive | voting | active | completed
+        phase: 'inactive',         // inactive | voting | active | interlude | campaign_completed
         candidates: [],
         votesByActorId: {},
         generatedRecipes: {},     // V3.3.6：测试/未来动态卷纲的房间级 Recipe
@@ -314,6 +317,12 @@ Story.createEmptyState = function (seed) {
         dormantArcs: [],
         completedArcs: [],
         lastDirectorEvent: null,
+        campaign: {
+          status: 'inactive', actIndex: 0, maxActs: 3,
+          interludeTurnsRemaining: 0,
+          clock: { id: 'campaign_crisis', label: '大劫逼近', current: 0, max: 30, stage: 0, status: 'inactive' },
+          ending: null,
+        },
       },
       // V3 兼容字段（仅作镜像，不承担真实逻辑）
       pendingChoices: {},
@@ -348,8 +357,10 @@ Story.Migration.migrateToV32 = function (s) {
   if (!s) return Story.createEmptyState();
   s.version = Story.VERSION;
   // world
-  if (!s.world) s.world = { seed: '', name: '', year: 1, worldBible: {}, publicFacts: [], publicRumors: [], activeWorldHooks: [], factions: [], regions: [] };
+  if (!s.world) s.world = { seed: '', name: '', year: 1, worldBible: {}, publicFacts: [], publicRumors: [], activeWorldHooks: [], factions: [], regions: [], ruleState: null, factionHistory: [] };
   if (!s.world.regions) s.world.regions = [];
+  if (!s.world.factionHistory) s.world.factionHistory = [];
+  if (!s.world.ruleState && s.world.worldBible) s.world.ruleState = Story.WorldRules.createState(s.world.worldBible);
   // story
   if (!s.story) s.story = {};
   const st = s.story;
@@ -382,6 +393,7 @@ Story.Migration.migrateToV32 = function (s) {
   st.narrativeStyleMemory.recentDominantImages = st.narrativeStyleMemory.recentDominantImages || [];
   if (!st.recentCanonicalSummaries) st.recentCanonicalSummaries = [];
   if (!st.lastTurnRecordId) st.lastTurnRecordId = null;
+  if (!Number.isInteger(st.stateVersion)) st.stateVersion = st.chapterIndex || 0;
   // V3.3 Narration Transaction 字段
   if (!st.turnPhase) st.turnPhase = 'collecting';
   if (!st.pendingResolution) st.pendingResolution = null;
@@ -389,8 +401,17 @@ Story.Migration.migrateToV32 = function (s) {
   if (!st.director) st.director = {
     phase: 'inactive', candidates: [], votesByActorId: {},
     generatedRecipes: {}, activeArc: null, dormantArcs: [], completedArcs: [], lastDirectorEvent: null,
+    campaign: null,
   };
   if (!st.director.generatedRecipes) st.director.generatedRecipes = {};
+  if (!st.director.campaign) st.director.campaign = {
+    status: st.director.phase === 'active' ? 'active' : 'inactive',
+    actIndex: (st.director.completedArcs || []).length + (st.director.activeArc ? 1 : 0), maxActs: 3,
+    interludeTurnsRemaining: 0,
+    clock: { id: 'campaign_crisis', label: '大劫逼近', current: 0, max: 30, stage: 0, status: st.director.phase === 'active' ? 'active' : 'inactive' },
+    ending: null,
+  };
+  if (!st.director.campaign.clock) st.director.campaign.clock = { id: 'campaign_crisis', label: '大劫逼近', current: 0, max: 30, stage: 0, status: 'active' };
   // currentChapter 补 provenance
   if (st.currentChapter && !st.currentChapter.provenance) {
     st.currentChapter.provenance = 'legacy';
@@ -482,6 +503,24 @@ Story._migrate = function (s) {
 Story.state = null;
 Story.rng = null;
 Story._rngByState = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
+Story._providerByState = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
+
+/** 将 Provider 运行时绑定到单个会话；未绑定的旧入口继续使用 Story.ai facade。 */
+Story.bindProviderContext = function (state, context) {
+  if (state && context && Story._providerByState) Story._providerByState.set(state, context);
+  return context;
+};
+
+Story.providerFor = function (state) {
+  var context = state && Story._providerByState && Story._providerByState.get(state);
+  if (context && context.inheritGlobal && Story.ai) {
+    context.enabled = !!Story.ai.enabled;
+    context.provider = Story.ai.provider || null;
+    context.timeoutMs = Story.ai.timeoutMs || context.timeoutMs || 30000;
+    context.providerMeta = Object.assign({}, Story.ai.providerMeta || {});
+  }
+  return context || Story.ai;
+};
 
 Story._bindStateRng = function (state, rng) {
   if (!state || !rng) return rng;
@@ -550,6 +589,210 @@ Story.buildWorldBible = function (roll) {
 };
 
 Story.worldBibleFromV2Seed = function (seed) { return Story.buildWorldBible(Story.rollOrigin(seed)); };
+
+/* ============================================================
+ * §3.2 WorldRules —— 七维世界骰的统一可执行契约
+ * ============================================================ */
+
+Story.WorldRules = Story.WorldRules || {};
+Story.WorldRules.DIMENSIONS = ['era', 'terrain', 'order', 'heavenlyLaw', 'greatTribulation', 'aberrant', 'storyGravity'];
+
+Story.WorldRules.RESOLVER_TABLE = {
+  era: {
+    '盛世': { cultivate: 2, social: 1 }, '衰世': { cultivate: -1, investigate: 1 },
+    '末法': { cultivate: -2, use_relic: 2 }, '天倾前夜': { battle: -1, flee: 1, investigate: 1 },
+  },
+  terrain: {
+    '山河大陆': { travel: 1, negotiate: 1 }, '群岛海域': { travel: -1, investigate: 1 },
+    '空岛海': { travel: -2, observe: 2 }, '妖域边荒': { battle: -1, investigate: 1 },
+    '地下灵脉': { travel: -1, cultivate: 1, investigate: 1 },
+  },
+  order: {
+    '宗门割据': { negotiate: -1, social: 1 }, '皇朝统治': { social: -1, deceive: -1, negotiate: 1 },
+    '妖族共治': { social: 1, negotiate: 1 }, '散修乱世': { deceive: 1, steal: 1, social: -1 },
+  },
+  heavenlyLaw: {
+    '飞升受阻': { cultivate: -1, investigate: 1 }, '轮回紊乱': { observe: 1, investigate: 1 },
+    '契约具现': { negotiate: 2, deceive: -2 }, '法宝有灵': { use_relic: 2, craft: 1 },
+  },
+  greatTribulation: {
+    '魔潮': { battle: -1, flee: -1 }, '天裂': { travel: -1, observe: 1 },
+    '古神苏醒': { cultivate: -1, investigate: 1 }, '灵脉枯竭': { cultivate: -2, craft: -1 },
+    '皇朝崩塌': { negotiate: -1, deceive: 1, battle: -1 },
+  },
+  aberrant: {
+    '妖族昌盛': { battle: -1, negotiate: 1 }, '鬼修横行': { cultivate: -1, observe: 1 },
+    '灵族复苏': { cultivate: 1, investigate: 1 }, '龙裔遗民': { use_relic: 1, investigate: 1 },
+  },
+  storyGravity: {
+    '夺宝': { investigate: 2, use_relic: 1 }, '宗门': { social: 2, negotiate: 1 },
+    '战争': { battle: 2, aid: 1 }, '游历': { travel: 2, observe: 1 },
+    '复仇': { investigate: 1, battle: 2 }, '经商': { negotiate: 2, craft: 1 },
+    '飞升': { cultivate: 2, investigate: 1 },
+  },
+};
+
+Story.WorldRules.EVENT_TABLE = {
+  era: { '盛世': ['abundance', 'sect_gathering'], '衰世': ['scarcity', 'relic_echo'], '末法': ['scarcity', 'sentient_relic'], '天倾前夜': ['disaster', 'deadline'] },
+  terrain: { '山河大陆': ['road', 'city'], '群岛海域': ['sea', 'island'], '空岛海': ['skyway', 'fall'], '妖域边荒': ['demon_border', 'wilderness'], '地下灵脉': ['cavern', 'vein'] },
+  order: { '宗门割据': ['sect_conflict'], '皇朝统治': ['law', 'tax'], '妖族共治': ['alliance', 'tension'], '散修乱世': ['bandit', 'market'] },
+  heavenlyLaw: { '飞升受阻': ['ascension_barrier'], '轮回紊乱': ['memory_error'], '契约具现': ['manifest_pact'], '法宝有灵': ['relic_will'] },
+  greatTribulation: { '魔潮': ['demon_tide'], '天裂': ['sky_crack'], '古神苏醒': ['old_god'], '灵脉枯竭': ['vein_dry'], '皇朝崩塌': ['dynasty_fall'] },
+  aberrant: { '妖族昌盛': ['demon_craft'], '鬼修横行': ['soul_hazard'], '灵族复苏': ['spirit_oath'], '龙裔遗民': ['dragon_relic'] },
+  storyGravity: { '夺宝': ['treasure'], '宗门': ['sect'], '战争': ['war'], '游历': ['wander'], '复仇': ['revenge'], '经商': ['trade'], '飞升': ['ascend'] },
+};
+
+Story.WorldRules._value = function (bible, dimension) {
+  if (!bible) return '';
+  return bible[dimension] || '';
+};
+
+Story.WorldRules.contractFor = function (bible, dimension) {
+  var value = Story.WorldRules._value(bible, dimension);
+  var source = Story.ORIGIN_EFFECT[dimension] && Story.ORIGIN_EFFECT[dimension][value] || {};
+  var modifiers = Story.WorldRules.RESOLVER_TABLE[dimension] && Story.WorldRules.RESOLVER_TABLE[dimension][value] || {};
+  var events = Story.WorldRules.EVENT_TABLE[dimension] && Story.WorldRules.EVENT_TABLE[dimension][value] || [];
+  var weights = {};
+  events.forEach(function (tag, index) { weights[tag] = Math.max(1, 3 - index); });
+  return {
+    id: dimension + ':' + value,
+    dimension: dimension,
+    value: value,
+    resolverModifiers: Story._clone(modifiers),
+    eventWeights: weights,
+    turnEffect: { pressurePerTurn: 1, matchedActionBonus: 1 },
+    explanation: source.rule || (dimension + '：' + value),
+  };
+};
+
+Story.WorldRules.compile = function (bible) {
+  return Story.WorldRules.DIMENSIONS.map(function (dimension) { return Story.WorldRules.contractFor(bible, dimension); });
+};
+
+Story.WorldRules.createState = function (bible) {
+  var dimensions = {};
+  Story.WorldRules.compile(bible).forEach(function (contract) {
+    dimensions[contract.dimension] = {
+      id: contract.id, value: contract.value, pressure: 0,
+      triggerCount: 0, lastTriggeredChapter: 0,
+    };
+  });
+  return { version: '1.0', turn: 0, dimensions: dimensions, recentEffects: [] };
+};
+
+Story.WorldRules.resolverModifiers = function (state, ctx) {
+  var category = ctx && ctx.category || '';
+  return Story.WorldRules.compile(state && state.world && state.world.worldBible).map(function (contract) {
+    return {
+      ruleId: contract.id,
+      dimension: contract.dimension,
+      value: contract.value,
+      category: category,
+      modifier: contract.resolverModifiers[category] || 0,
+      explanation: contract.explanation,
+    };
+  }).filter(function (entry) { return entry.modifier !== 0; });
+};
+
+Story.WorldRules.eventWeights = function (state) {
+  var result = {};
+  Story.WorldRules.compile(state && state.world && state.world.worldBible).forEach(function (contract) {
+    Object.keys(contract.eventWeights).forEach(function (tag) {
+      result[tag] = (result[tag] || 0) + contract.eventWeights[tag];
+    });
+  });
+  return result;
+};
+
+Story.WorldRules.applyToAction = function (state, action) {
+  if (!action) return action;
+  var entries = Story.WorldRules.resolverModifiers(state, { category: action.category });
+  action.worldRuleModifiers = entries;
+  var total = entries.reduce(function (sum, entry) { return sum + entry.modifier; }, 0);
+  action.worldRuleModifierTotal = total;
+  if (action.category === 'cultivate' && total) {
+    (action.actorStatusDeltas || []).forEach(function (delta) {
+      if (delta.key === 'cultivationProgress') delta.delta = Math.max(1, delta.delta + total * 2);
+    });
+    (action.gains || []).forEach(function (gain) {
+      if (gain.type === 'cultivation') {
+        gain.delta = Math.max(1, (gain.delta || 0) + total * 2);
+        gain.text = '世界规则修正后，修为' + (total > 0 ? '更快' : '更艰难地') + '精进。';
+      }
+    });
+  }
+  if (action.category === 'travel' && total < 0 && action.timePassed) {
+    action.timePassed = { value: Math.max(1, (action.timePassed.value || 1) + Math.abs(total)), unit: action.timePassed.unit || '日' };
+  }
+  if (total >= 3 && action.outcome === 'partial_success') action.outcome = 'success';
+  if (total <= -3 && action.outcome === 'success') {
+    action.outcome = 'success_with_cost';
+    action.costs = (action.costs || []).concat([{ type: 'world_rule', text: '世界法则使这次行动付出额外代价。' }]);
+  }
+  return action;
+};
+
+Story.WorldRules.applyTurnEffects = function (state, envelope) {
+  var ruleState = state.world.ruleState || (state.world.ruleState = Story.WorldRules.createState(state.world.worldBible));
+  var categories = (envelope && envelope.actions || []).map(function (action) { return action.category; });
+  ruleState.turn = (ruleState.turn || 0) + 1;
+  var effects = [];
+  Story.WorldRules.compile(state.world.worldBible).forEach(function (contract) {
+    var slot = ruleState.dimensions[contract.dimension];
+    if (!slot) return;
+    var matched = categories.some(function (category) { return !!contract.resolverModifiers[category]; });
+    slot.pressure += contract.turnEffect.pressurePerTurn + (matched ? contract.turnEffect.matchedActionBonus : 0);
+    if (matched) {
+      slot.triggerCount += 1;
+      slot.lastTriggeredChapter = state.story.chapterIndex || 0;
+      effects.push({ ruleId: contract.id, dimension: contract.dimension, value: contract.value, chapterIndex: state.story.chapterIndex || 0 });
+    }
+  });
+  ruleState.recentEffects = (ruleState.recentEffects || []).concat(effects).slice(-20);
+  return effects;
+};
+
+Story.WorldRules.explain = function (state) {
+  var ruleState = state && state.world && state.world.ruleState;
+  return Story.WorldRules.compile(state && state.world && state.world.worldBible).map(function (contract) {
+    var slot = ruleState && ruleState.dimensions && ruleState.dimensions[contract.dimension] || {};
+    return {
+      id: contract.id, dimension: contract.dimension, value: contract.value,
+      explanation: contract.explanation,
+      resolverModifiers: Story._clone(contract.resolverModifiers),
+      eventWeights: Story._clone(contract.eventWeights),
+      pressure: slot.pressure || 0,
+      triggerCount: slot.triggerCount || 0,
+    };
+  });
+};
+
+Story.FactionSystem = Story.FactionSystem || {};
+Story.FactionSystem.afterTurn = function (state) {
+  var factions = state && state.world && state.world.factions || [];
+  if (!factions.length) return null;
+  var turn = state.story.chapterIndex || 0;
+  var index = Story.hashSeed((state.world.seed || '') + ':faction:' + turn) % factions.length;
+  var faction = factions[index];
+  var mode = turn % 3;
+  var action;
+  if (mode === 0) {
+    faction.power = Math.min(100, (faction.power || 0) + 1);
+    action = { type: 'consolidate', text: faction.name + '巩固了自身力量。', powerDelta: 1 };
+  } else if (mode === 1) {
+    faction.control = Math.min(10, (faction.control || 0) + 1);
+    faction.stance = faction.control >= 3 ? '进取' : '中立';
+    action = { type: 'contest', text: faction.name + '扩大了区域影响。', controlDelta: 1 };
+  } else {
+    faction.resources = Math.min(20, (faction.resources || 0) + 1);
+    action = { type: 'gather', text: faction.name + '取得了一批可用资源。', resourceDelta: 1 };
+  }
+  action.factionId = faction.id;
+  action.chapterIndex = turn;
+  faction.lastAction = Story._clone(action);
+  state.world.factionHistory = (state.world.factionHistory || []).concat([Story._clone(action)]).slice(-30);
+  return action;
+};
 
 /* ============================================================
  * §3.5 CharacterGenesis —— 命盘（V3.3 Phase 4）
@@ -668,11 +911,16 @@ Story.createSession = async function (config) {
 
   var state = Story.createEmptyState();
   Story.state = state;
+  if (config.providerContext) Story.bindProviderContext(state, config.providerContext);
   state.world.seed = seed;
   state.world.name = bible.worldName;
   state.world.year = 1;
   state.world.worldBible = bible;
-  state.world.factions = bible.factionPool.map(function (name, i) { return { id: 'fac_' + i, name: name, power: 50, stance: '中立' }; });
+  state.world.ruleState = Story.WorldRules.createState(bible);
+  state.world.factionHistory = [];
+  state.world.factions = bible.factionPool.map(function (name, i) {
+    return { id: 'fac_' + i, name: name, power: 50, stance: '中立', control: 0, resources: 0, goal: i === 0 ? '扩张影响' : (i === 1 ? '守住根基' : '积累资源'), lastAction: null };
+  });
   state.world.publicFacts = [bible.rules[0], bible.rules[3] + '此界天道如此。'];
   state.world.publicRumors = [];
   state.world.activeWorldHooks = [];
@@ -732,6 +980,8 @@ Story._generateOpening = async function (state) {
   // 4. 进入 awaiting_narration：世界状态零变化，存 pendingResolution
   Story._setTurnPhase(state, 'awaiting_narration');
   state.story.pendingResolution = {
+    pendingId: 'pending:turn_opening:v' + state.story.stateVersion,
+    expectedVersion: state.story.stateVersion,
     turnId: 'turn_opening',
     envelope: envelope,
     actionsByActorId: {},
@@ -742,12 +992,14 @@ Story._generateOpening = async function (state) {
     retryCount: 0,
     lastNarrationError: null,
     projectedState: Story.Narration.buildProjectedState(state, state, envelope, state.story.currentScene),
+    resolutionEcho: Story.Narration.buildResolutionEcho(state, envelope),
   };
 
   // 5. 调 AI 叙事
   const brief = Story.Narration.buildBrief(state, state.story.currentScene, envelope);
   state.story.pendingResolution.qualityPlan = brief.qualityPlan;
-  const narration = Story.ai.enabled ? await Story.Provider.narrate(state, brief) : null;
+  const providerContext = Story.providerFor(state);
+  const narration = providerContext && providerContext.enabled ? await Story.Provider.narrate(state, brief) : null;
 
   if (!narration || !narration.title || !narration.chapter) {
     // AI 失败：停在 narration_failed，不应用任何状态
@@ -772,7 +1024,7 @@ Story._generateOpening = async function (state) {
     Story.Narration.failPendingForDirectorViolation(state, directorViolation, false);
     return;
   }
-  const coverageViolation = Story.ai.providerMeta && /^mock(?:-|$)/.test(Story.ai.providerMeta.provider || '') ? null : Story.Narration.validateCoverage(narration, brief);
+  const coverageViolation = providerContext && providerContext.providerMeta && /^mock(?:-|$)/.test(providerContext.providerMeta.provider || '') ? null : Story.Narration.validateCoverage(narration, brief);
   if (coverageViolation) {
     Story.Narration.failPendingForDirectorViolation(state, coverageViolation, false);
     return;
@@ -790,11 +1042,20 @@ Story._commitPendingResolution = function (state, narration, isOpening) {
   const s = state.story;
   const pr = s.pendingResolution;
   if (!pr) throw new Error('无 pendingResolution 可提交');
+  if (pr.expectedVersion != null && pr.expectedVersion !== s.stateVersion) {
+    var staleError = new Error('过期叙事响应：expectedVersion=' + pr.expectedVersion + ' currentVersion=' + s.stateVersion);
+    staleError.code = 'STALE_PENDING_TURN';
+    throw staleError;
+  }
   const envelope = pr.envelope;
   Story._setTurnPhase(state, 'published');
 
   // 1. 应用裁决
   Story.Delta.applyEnvelope(state, envelope);
+  if (!isOpening) {
+    Story.WorldRules.applyTurnEffects(state, envelope);
+    Story.FactionSystem.afterTurn(state);
+  }
   // V3.3.1：应用 AgentArc 延迟提交（AI 失败时不提交，此处才写入 actor.agentArc）
   var agentArcDeltas = s._pendingAgentArcDeltas;
   if (agentArcDeltas) {
@@ -818,6 +1079,8 @@ Story._commitPendingResolution = function (state, narration, isOpening) {
     // 开局场景在 _generateOpening 中已创建，这里不覆盖
   } else {
     s.currentScene = Story.Scene.composeNext(state, envelope);
+    var arcCompletedThisTurn = !!(pr.directorPlan && (pr.directorPlan.arcDeltas || []).some(function (delta) { return delta.op === 'COMPLETE_ARC'; }));
+    Story.ArcScheduler.afterTurn(state, { arcCompletedThisTurn: arcCompletedThisTurn });
   }
   // 3. 生成下一轮选项
   const choices = Story.ChoiceFactory.buildAll(state, s.currentScene, envelope);
@@ -853,6 +1116,7 @@ Story._commitPendingResolution = function (state, narration, isOpening) {
   };
   state.ledger.turnRecords.push(turnRecord);
   s.lastTurnRecordId = turnId;
+  s.stateVersion = (s.stateVersion || 0) + 1;
   // 7. 清空 pendingResolution，回 collecting
   s.pendingResolution = null;
   Story._setTurnPhase(state, 'collecting');
@@ -883,15 +1147,16 @@ Story.retryNarration = async function (storyState, options) {
   }
 
   // 换模型/Provider（可选）
-  if (options.modelOverride && Story.ai.setModel) {
-    try { Story.ai.setModel(options.modelOverride); } catch (e) {}
+  const providerContext = Story.providerFor(state);
+  if (options.modelOverride && providerContext && providerContext.setModel) {
+    try { providerContext.setModel(options.modelOverride); } catch (e) {}
   }
 
   const isOpening = (pr.turnId === 'turn_opening');
   const scene = isOpening ? pr.sceneBefore : state.story.currentScene;
   const brief = Story.Narration.buildBrief(state, scene, pr.envelope);
   pr.qualityPlan = brief.qualityPlan;
-  const narration = Story.ai.enabled ? await Story.Provider.narrate(state, brief) : null;
+  const narration = providerContext && providerContext.enabled ? await Story.Provider.narrate(state, brief) : null;
 
   if (!narration || !narration.title || !narration.chapter) {
     // 仍失败：retryCount++，停在 narration_failed
@@ -917,7 +1182,7 @@ Story.retryNarration = async function (storyState, options) {
     Story.Narration.failPendingForDirectorViolation(state, directorViolation, true);
     return null;
   }
-  const coverageViolation = Story.ai.providerMeta && /^mock(?:-|$)/.test(Story.ai.providerMeta.provider || '') ? null : Story.Narration.validateCoverage(narration, brief);
+  const coverageViolation = providerContext && providerContext.providerMeta && /^mock(?:-|$)/.test(providerContext.providerMeta.provider || '') ? null : Story.Narration.validateCoverage(narration, brief);
   if (coverageViolation) {
     Story.Narration.failPendingForDirectorViolation(state, coverageViolation, true);
     return null;
@@ -1029,6 +1294,8 @@ Story.resolveTurn = async function (storyState, actionsByActorId, options) {
   Story._setTurnPhase(state, 'awaiting_narration');
   const turnId = 'turn_' + String(chapterIndexBefore + 1).padStart(4, '0');
   state.story.pendingResolution = {
+    pendingId: 'pending:' + turnId + ':v' + s.stateVersion,
+    expectedVersion: s.stateVersion,
     turnId: turnId,
     envelope: envelope,
     actionsByActorId: Story._clone(actionsByActorId),
@@ -1041,6 +1308,7 @@ Story.resolveTurn = async function (storyState, actionsByActorId, options) {
     directorPlan: directorPlan,
     sceneAfterPreview: sceneAfterPreview,
     projectedState: projectedState,
+    resolutionEcho: Story.Narration.buildResolutionEcho(state, envelope),
   };
 
   // 服务端持久化边界：行动已锁定且 pendingResolution 已建立，但尚未发起 AI 请求。
@@ -1049,13 +1317,14 @@ Story.resolveTurn = async function (storyState, actionsByActorId, options) {
   // 6. 调 AI 叙事
   const brief = Story.Narration.buildBrief(state, s.currentScene, envelope);
   state.story.pendingResolution.qualityPlan = brief.qualityPlan;
+  const providerContext = Story.providerFor(state);
   const contractViolation = Story.Narration.validateTurnContractCompleteness(brief.turnContract);
-  if (contractViolation && Story.ai.providerMeta && Story.ai.providerMeta.enforcePublishGate) {
+  if (contractViolation && providerContext && providerContext.providerMeta && providerContext.providerMeta.enforcePublishGate) {
     state.story.pendingResolution.lastNarrationError = { code: contractViolation.code, message: contractViolation.message, rawPreview: '' };
     Story._setTurnPhase(state, 'narration_failed');
     return state;
   }
-  const narration = Story.ai.enabled ? await Story.Provider.narrate(state, brief) : null;
+  const narration = providerContext && providerContext.enabled ? await Story.Provider.narrate(state, brief) : null;
 
   if (!narration || !narration.title || !narration.chapter) {
     // AI 失败：停在 narration_failed，不应用任何状态
@@ -1080,7 +1349,7 @@ Story.resolveTurn = async function (storyState, actionsByActorId, options) {
     Story.Narration.failPendingForDirectorViolation(state, directorViolation, false);
     return state;
   }
-  const coverageViolation = Story.ai.providerMeta && /^mock(?:-|$)/.test(Story.ai.providerMeta.provider || '') ? null : Story.Narration.validateCoverage(narration, brief);
+  const coverageViolation = providerContext && providerContext.providerMeta && /^mock(?:-|$)/.test(providerContext.providerMeta.provider || '') ? null : Story.Narration.validateCoverage(narration, brief);
   if (coverageViolation) {
     Story.Narration.failPendingForDirectorViolation(state, coverageViolation, false);
     return state;
@@ -1440,7 +1709,7 @@ Story.Intent._findTargetById = function (state, id) {
 };
 
 /** 统一动态目标解析器：仅返回本地状态中可证明存在的目标。 */
-Story.Intent.resolveTarget = function (state, actorId, text, category) {
+Story.Intent._resolveTargetV341 = function (state, actorId, text, category) {
   const t = String(text || '');
   const actors = (state && state.actors || []).slice().sort(function (a, b) {
     const ai = parseInt(String(a.seatId || '').replace(/\D/g, ''), 10);
@@ -1521,7 +1790,6 @@ Story.Intent.resolveTarget = function (state, actorId, text, category) {
 };
 
 /* V3.4.2：目标解析的可达性元数据。旧调用方仍可只使用 type/id/name。 */
-Story.Intent._resolveTargetV341 = Story.Intent.resolveTarget;
 Story.Intent.resolveTarget = function (state, actorId, text, category) {
   var target = Story.Intent._resolveTargetV341(state, actorId, text, category) || {};
   var scene = state && state.story && state.story.currentScene || {};
@@ -2700,19 +2968,9 @@ Story.Director.generateCandidates = function (state) {
   return candidates;
 };
 
-/**
- * 激活选中卷纲。
- * 写入 activeArc，未选中的写入 dormantArcs。
- * 按 openingSeed 创建线程、实体、时钟。
- * 注意：不修改 currentScene（由调用方在 activateArc 之后创建场景）。
- */
-Story.Director.activateArc = function (state, arcId) {
-  var d = state.story.director;
-  var candidate = d.candidates.find(function (c) { return c.arcId === arcId; });
-  if (!candidate) throw new Error('未找到候选卷纲：' + arcId);
+Story.Director._arcFromCandidate = function (state, candidate) {
   var recipe = Story.Director.getRecipe(state, candidate.recipeId);
   if (!recipe) throw new Error('未找到 Recipe：' + candidate.recipeId);
-  // 构造 activeArc
   var arc = {
     arcId: candidate.arcId,
     recipeId: candidate.recipeId,
@@ -2723,12 +2981,15 @@ Story.Director.activateArc = function (state, arcId) {
     status: 'active',
     startedAtChapter: state.story.chapterIndex || 0,
     currentBeatIndex: 0,
+    beatProgressTarget: 2,
     beats: (recipe.beats || []).map(function (b, i) {
       return {
         beatId: b.beatId,
         title: b.title,
         dramaticGoal: b.dramaticGoal,
         status: i === 0 ? 'active' : 'pending',
+        progress: 0,
+        progressTarget: 2,
         advanceSignals: b.advanceSignals,
         bendSignals: b.bendSignals,
         stallSignals: b.stallSignals,
@@ -2756,8 +3017,30 @@ Story.Director.activateArc = function (state, arcId) {
       onFull: c.onFull || 'divert',
     });
   }
+  return arc;
+};
+
+/**
+ * 激活选中卷纲。
+ * 写入 activeArc，未选中的写入 dormantArcs。
+ * 按 openingSeed 创建线程、实体、时钟。
+ * 注意：不修改 currentScene（由调用方在 activateArc 之后创建场景）。
+ */
+Story.Director.activateArc = function (state, arcId) {
+  var d = state.story.director;
+  var candidate = d.candidates.find(function (c) { return c.arcId === arcId; });
+  if (!candidate) throw new Error('未找到候选卷纲：' + arcId);
+  var arc = Story.Director._arcFromCandidate(state, candidate);
   d.activeArc = arc;
   d.phase = 'active';
+  d.campaign = d.campaign || {};
+  d.campaign.status = 'active';
+  d.campaign.actIndex = 1;
+  d.campaign.maxActs = Math.min(3, Math.max(1, d.candidates.length));
+  d.campaign.interludeTurnsRemaining = 0;
+  d.campaign.ending = null;
+  d.campaign.clock = d.campaign.clock || { id: 'campaign_crisis', label: '大劫逼近', current: 0, max: 30, stage: 0, status: 'active' };
+  d.campaign.clock.status = 'active';
   // 未选中的放入 dormantArcs
   d.candidates.forEach(function (c) {
     if (c.arcId === arcId) return;
@@ -2766,7 +3049,15 @@ Story.Director.activateArc = function (state, arcId) {
       recipeId: c.recipeId,
       family: c.family,
       title: c.title,
+      publicPitch: c.publicPitch,
+      tags: (c.tags || []).slice(),
       status: 'dormant',
+      wakeWhen: {
+        all: [
+          { type: 'arc_completed', arcId: arcId },
+          { type: 'interlude_elapsed', turns: 1 },
+        ],
+      },
       wakeConditions: ['chapterIndex >= 8', 'arc ' + arcId + ' completed'],
     });
   });
@@ -2910,6 +3201,133 @@ Story.Director.applyArcAssets = function (state, activeArc) {
       };
     });
   }
+};
+
+/* ---------- ArcScheduler：三幕接力、结构化唤醒与全局危机时钟 ---------- */
+Story.ArcScheduler = Story.ArcScheduler || {};
+
+Story.ArcScheduler.evaluatePredicate = function (state, predicate) {
+  predicate = predicate || {};
+  var d = state && state.story && state.story.director;
+  var campaign = d && d.campaign || {};
+  if (!d) return false;
+  if (predicate.all) return predicate.all.every(function (item) { return Story.ArcScheduler.evaluatePredicate(state, item); });
+  if (predicate.any) return predicate.any.some(function (item) { return Story.ArcScheduler.evaluatePredicate(state, item); });
+  if (predicate.not) return !Story.ArcScheduler.evaluatePredicate(state, predicate.not);
+  if (predicate.type === 'arc_completed') {
+    return (d.completedArcs || []).some(function (arc) { return !predicate.arcId || arc.arcId === predicate.arcId; });
+  }
+  if (predicate.type === 'interlude_elapsed') return (campaign.interludeTurnsRemaining || 0) <= 0;
+  if (predicate.type === 'chapter_at_least') return (state.story.chapterIndex || 0) >= (predicate.value || 0);
+  if (predicate.type === 'thread_stage_at_least') {
+    var thread = (state.story.activeThreads || []).find(function (item) { return item.threadId === predicate.threadId; });
+    return !!thread && (thread.stage || 0) >= (predicate.value || 0);
+  }
+  if (predicate.type === 'world_flag') {
+    var flags = state.world && state.world.worldBible && state.world.worldBible.flags || {};
+    return flags[predicate.flag] === (predicate.value === undefined ? true : predicate.value);
+  }
+  return false;
+};
+
+Story.ArcScheduler._syncSceneThreads = function (state) {
+  var scene = state.story.currentScene;
+  if (!scene) return;
+  scene.activeThreadIds = (state.story.activeThreads || []).filter(function (thread) {
+    return thread && (thread.status === 'active' || thread.status === 'dormant');
+  }).map(function (thread) { return thread.threadId; });
+};
+
+Story.ArcScheduler.closeArcThreads = function (state, arcId, status) {
+  (state.story.activeThreads || []).forEach(function (thread) {
+    if (!thread || thread.sourceArcId !== arcId) return;
+    if (thread.status !== 'active' && thread.status !== 'dormant') return;
+    thread.status = status || 'completed';
+    if (thread.status === 'completed') thread.stage = Math.max(thread.stage || 0, thread.maxStage || 1);
+    thread.lastAdvancedChapter = state.story.chapterIndex || 0;
+  });
+  Story.ArcScheduler._syncSceneThreads(state);
+};
+
+Story.ArcScheduler.completeArc = function (state, arc) {
+  var d = state.story.director;
+  var campaign = d.campaign;
+  if (!(d.completedArcs || []).some(function (item) { return item.arcId === arc.arcId; })) {
+    d.completedArcs.push({ arcId: arc.arcId, recipeId: arc.recipeId, title: arc.title, completedAtChapter: state.story.chapterIndex });
+  }
+  Story.ArcScheduler.closeArcThreads(state, arc.arcId, 'completed');
+  if ((d.dormantArcs || []).length) {
+    d.phase = 'interlude';
+    campaign.status = 'interlude';
+    campaign.interludeTurnsRemaining = 1;
+  } else {
+    d.phase = 'campaign_completed';
+    campaign.status = 'completed';
+    campaign.interludeTurnsRemaining = 0;
+    campaign.ending = { type: 'success', label: '三幕因果已定', completedAtChapter: state.story.chapterIndex };
+    if (campaign.clock) campaign.clock.status = 'completed';
+  }
+};
+
+Story.ArcScheduler._wakeNextArc = function (state) {
+  var d = state.story.director;
+  var index = (d.dormantArcs || []).findIndex(function (candidate) {
+    return !candidate.wakeWhen || Story.ArcScheduler.evaluatePredicate(state, candidate.wakeWhen);
+  });
+  if (index < 0) return null;
+  var candidate = d.dormantArcs.splice(index, 1)[0];
+  var arc = Story.Director._arcFromCandidate(state, candidate);
+  d.activeArc = arc;
+  d.phase = 'active';
+  d.campaign.status = 'active';
+  d.campaign.actIndex = Math.min(d.campaign.maxActs || 3, (d.campaign.actIndex || 1) + 1);
+  d.campaign.interludeTurnsRemaining = 0;
+  Story.Director.applyArcOpeningScenePatch(state, arc);
+  Story.Director.applyOpeningSeed(state, arc);
+  Story.Director.applyArcAssets(state, arc);
+  Story.ArcScheduler._syncSceneThreads(state);
+  d.lastDirectorEvent = {
+    arcId: arc.arcId, beatId: arc.beats[0] && arc.beats[0].beatId,
+    result: 'arc_woken', chapterIndex: state.story.chapterIndex,
+  };
+  return arc;
+};
+
+Story.ArcScheduler._failCampaignForClock = function (state) {
+  var d = state.story.director;
+  var campaign = d.campaign;
+  if (d.activeArc && d.activeArc.status === 'active') {
+    d.activeArc.status = 'failed';
+    Story.ArcScheduler.closeArcThreads(state, d.activeArc.arcId, 'failed');
+  }
+  d.phase = 'campaign_completed';
+  campaign.status = 'failed';
+  campaign.ending = { type: 'cost', label: '大劫时钟走尽', completedAtChapter: state.story.chapterIndex };
+  campaign.clock.status = 'completed';
+  d.lastDirectorEvent = {
+    arcId: d.activeArc && d.activeArc.arcId || '', beatId: '',
+    result: 'campaign_failed', chapterIndex: state.story.chapterIndex,
+  };
+};
+
+Story.ArcScheduler.afterTurn = function (state, options) {
+  options = options || {};
+  var d = state && state.story && state.story.director;
+  var campaign = d && d.campaign;
+  if (!d || !campaign || campaign.status === 'inactive' || d.phase === 'campaign_completed') return null;
+  var clock = campaign.clock;
+  if (clock && clock.status === 'active') {
+    clock.current = Math.min(clock.max || 30, (clock.current || 0) + 1);
+    clock.stage = Math.min(4, Math.floor((clock.current / Math.max(1, clock.max || 30)) * 4));
+    if (clock.current >= (clock.max || 30)) {
+      Story.ArcScheduler._failCampaignForClock(state);
+      return null;
+    }
+  }
+  if (d.phase !== 'interlude' || options.arcCompletedThisTurn) return null;
+  campaign.interludeTurnsRemaining = Math.max(0, (campaign.interludeTurnsRemaining || 0) - 1);
+  if (campaign.interludeTurnsRemaining > 0) return null;
+  return Story.ArcScheduler._wakeNextArc(state);
 };
 
 /* ---------- DirectorVote 投票模块 ---------- */
@@ -3156,15 +3574,22 @@ Story.Director.applyPlan = function (state, plan) {
   (plan.arcDeltas || []).forEach(function (ad) {
     if (ad.op === 'ADVANCE_BEAT') {
       var curBeat = (arc.beats || []).find(function (b) { return b.beatId === ad.beatId; });
-      if (curBeat) curBeat.status = 'completed';
-      var nextIdx = (arc.beats || []).findIndex(function (b) { return b.beatId === ad.nextBeatId; });
-      if (nextIdx >= 0) { arc.currentBeatIndex = nextIdx; arc.beats[nextIdx].status = 'active'; }
+      if (curBeat) {
+        curBeat.progress = Math.min(curBeat.progressTarget || arc.beatProgressTarget || 1, (curBeat.progress || 0) + 1);
+      }
+      if (!curBeat || curBeat.progress >= (curBeat.progressTarget || arc.beatProgressTarget || 1)) {
+        if (curBeat) curBeat.status = 'completed';
+        var nextIdx = (arc.beats || []).findIndex(function (b) { return b.beatId === ad.nextBeatId; });
+        if (nextIdx >= 0) { arc.currentBeatIndex = nextIdx; arc.beats[nextIdx].status = 'active'; }
+      }
     } else if (ad.op === 'COMPLETE_ARC') {
       var cb = (arc.beats || []).find(function (b) { return b.beatId === ad.beatId; });
-      if (cb) cb.status = 'completed';
-      arc.status = 'completed';
-      d.phase = 'completed';
-      d.completedArcs.push({ arcId: arc.arcId, title: arc.title, completedAtChapter: state.story.chapterIndex });
+      if (cb) cb.progress = Math.min(cb.progressTarget || arc.beatProgressTarget || 1, (cb.progress || 0) + 1);
+      if (!cb || cb.progress >= (cb.progressTarget || arc.beatProgressTarget || 1)) {
+        if (cb) cb.status = 'completed';
+        arc.status = 'completed';
+        Story.ArcScheduler.completeArc(state, arc);
+      }
     } else if (ad.op === 'SHATTER_ARC') {
       var sb = (arc.beats || []).find(function (b) { return b.beatId === ad.beatId; });
       if (sb) sb.status = 'shattered';
@@ -3757,6 +4182,21 @@ Story.Director.getSnapshot = function (state) {
     ? state.story.pendingResolution.directorPlan : null;
   return {
     phase: d.phase,
+    campaign: d.campaign ? {
+      status: d.campaign.status,
+      actIndex: d.campaign.actIndex || 0,
+      maxActs: d.campaign.maxActs || 3,
+      interludeTurnsRemaining: d.campaign.interludeTurnsRemaining || 0,
+      clock: d.campaign.clock ? {
+        id: d.campaign.clock.id,
+        label: d.campaign.clock.label,
+        current: d.campaign.clock.current || 0,
+        max: d.campaign.clock.max || 30,
+        stage: d.campaign.clock.stage || 0,
+        status: d.campaign.clock.status || 'inactive',
+      } : null,
+      ending: d.campaign.ending ? Story._clone(d.campaign.ending) : null,
+    } : null,
     activeArc: arc ? {
       arcId: arc.arcId,
       recipeId: arc.recipeId,
@@ -3770,6 +4210,8 @@ Story.Director.getSnapshot = function (state) {
         title: beat.title,
         status: beat.status,
         dramaticGoal: beat.dramaticGoal || '',
+        progress: beat.progress || 0,
+        progressTarget: beat.progressTarget || arc.beatProgressTarget || 1,
       } : null,
       beats: (arc.beats || []).map(function (b) {
         return {
@@ -3777,6 +4219,8 @@ Story.Director.getSnapshot = function (state) {
           title: b.title,
           status: b.status,
           dramaticGoal: b.dramaticGoal || '',
+          progress: b.progress || 0,
+          progressTarget: b.progressTarget || arc.beatProgressTarget || 1,
         };
       }),
       pressureClocks: (arc.pressureClocks || []).map(function (c) {
@@ -3888,7 +4332,7 @@ Story.Resolver.resolveActorAction = function (state, scene, intent) {
     result.publicEffects = [(actor ? actor.name : intent.actorId) + '起初' + sequence.abortedIntents[0].text + '，中途转折，最终' + (sequence.finalIntent.text || '改变行动') + '。'].concat(result.publicEffects || []);
     result.costs = (result.costs || []).concat([{ type: 'action_reversal', text: '起始行动未完成，最终行动取代了原计划。' }]);
   }
-  return result;
+  return Story.WorldRules.applyToAction(state, result);
 };
 
 Story.Resolver._timePassed = function (pref) {
@@ -4939,6 +5383,46 @@ Story.Agent._relatesToGoal = function (actor, choice) {
 
 Story.Narration = Story.Narration || {};
 
+/**
+ * 模型返回前即可公开的确定性裁决回响。只含公开行动、目标、结果与代价，
+ * 不复制 privateDelta、私密收益或隐藏线程。
+ */
+Story.Narration.buildResolutionEcho = function (state, envelope) {
+  envelope = envelope || {};
+  var actions = (envelope.actions || []).map(function (action) {
+    var actor = (state.actors || []).find(function (item) { return item.id === action.actorId; });
+    return {
+      actorId: action.actorId,
+      actorName: actor ? actor.name : action.actorId,
+      category: action.category,
+      actionText: action.rawText || Story.Narration._catLabel(action.category),
+      targetId: action.targetId || '',
+      targetName: action.targetName || '',
+      outcome: action.outcome,
+      outcomeLabel: Story.Narration._outcomeLabel(action.outcome),
+      costs: (action.costs || []).map(function (cost) { return cost.text; }).filter(Boolean),
+      publicEffects: (action.publicEffects || []).slice(),
+      worldRuleModifiers: (action.worldRuleModifiers || []).map(function (entry) {
+        return { ruleId: entry.ruleId, dimension: entry.dimension, value: entry.value, modifier: entry.modifier };
+      }),
+    };
+  });
+  return {
+    version: '1.0',
+    turnId: envelope.turnId || '',
+    readyAt: Date.now(),
+    actions: actions,
+    interactions: (envelope.interactions || []).map(function (interaction) {
+      return {
+        interactionId: interaction.interactionId || '',
+        type: interaction.type || interaction.interactionType || '',
+        actorIds: (interaction.actorIds || []).slice(),
+        publicFacts: (interaction.requiredNarrativeFacts || []).slice(),
+      };
+    }),
+  };
+};
+
 /* V3.4.3：文案档位只调整表现预算，不改变任何本地裁决事实。 */
 Story.Narration.PROSE_PROFILES = {
   concise: {
@@ -5369,7 +5853,7 @@ Story.Narration._violation = function (code, message, text, details) {
   return { code: code, message: message, rawPreview: String(text || '').slice(0, 300), details: details || null };
 };
 
-Story.Narration.validateActionFacts = function (narration, contract) {
+Story.Narration._validateActionFactsLegacy = function (narration, contract) {
   const parsed = Story.Narration._parsedText(narration);
   const text = parsed.chapter;
   const actionWords = {
@@ -6210,27 +6694,44 @@ Story.Provider.capabilities = {
 
 Story.Provider.ERROR_CODES = ['NO_API_CONFIG','NO_API_KEY','NETWORK_ERROR','CORS_ERROR','HTTP_401','HTTP_403','HTTP_404','HTTP_429','HTTP_5XX','TIMEOUT','EMPTY_RESPONSE','INVALID_JSON','INVALID_SCHEMA','MODEL_OVERREACH','FORBIDDEN_REVEAL','MISSING_REQUIRED_BEAT','MISSING_OPENING_ANCHOR','MISSING_ACTION_FACT','MISSING_INTERACTION_FACT','WRONG_ACTION_TARGET','WRONG_ACTION_OUTCOME','REPETITIVE_NARRATION','REPETITIVE_OPENING','UNREGISTERED_ENTITY','UNREGISTERED_LOCATION','UNAUTHORIZED_EVENT','UNAUTHORIZED_SUPERNATURAL_EFFECT','UNAUTHORIZED_CLUE','UNAUTHORIZED_REWARD','PLAYER_AGENCY_VIOLATION','PLAYER_ACTION_SUPPRESSED','NARRATIVE_CONTRACT_INCOMPLETE','NARRATION_PUBLISH_BLOCKED','NARRATION_TOO_SHORT','NARRATION_INCOMPLETE','NARRATION_TRUNCATED','INSUFFICIENT_PARAGRAPHS','SCENE_CONTRADICTION','TARGET_NOT_PRESENT','TARGET_NOT_REACHABLE','AMBIGUOUS_TARGET','TEMPORAL_CONTRADICTION','CONTINUITY_CONTRADICTION','EVIDENCE_STATUS_VIOLATION'];
 
+Story.Provider._withTimeout = function (providerContext, promise) {
+  var timeoutMs = providerContext && providerContext.timeoutMs || 30000;
+  return new Promise(function (resolve) {
+    var done = false;
+    var timer = setTimeout(function () {
+      if (!done) { done = true; resolve({ __timeout: true }); }
+    }, timeoutMs);
+    Promise.resolve(promise).then(function (value) {
+      if (!done) { done = true; clearTimeout(timer); resolve(value); }
+    }, function (error) {
+      if (!done) { done = true; clearTimeout(timer); resolve({ __providerError: error }); }
+    });
+  });
+};
+
 /** 调用 AI 叙事（兼容旧 ai.provider.narrate）。返回归一化后的 {title,chapter,dialogues,endingImage,_autoFixed} 或 null。 */
 Story.Provider.narrate = async function (state, brief) {
-  if (!Story.ai.enabled) {
-    Story.setAIStatus('disabled', { code: 'disabled', message: 'AI 未启用，本回合裁决已保留，等待重试。' });
+  const providerContext = Story.providerFor(state) || {};
+  const setStatus = function (status, details) { return Story.setAIStatusFor(state, status, details); };
+  if (!providerContext.enabled) {
+    setStatus('disabled', { code: 'disabled', message: 'AI 未启用，本回合裁决已保留，等待重试。' });
     state.api.lastStatus = 'offline'; state.api.lastErrorCode = null;
     return null;
   }
-  if (!Story.ai.provider || typeof Story.ai.provider.narrate !== 'function') {
-    Story.setAIStatus('fallback', { code: 'NO_API_CONFIG', message: 'AI 已开启，但缺少可用 Provider，本回合裁决已保留，等待重试。' });
+  if (!providerContext.provider || typeof providerContext.provider.narrate !== 'function') {
+    setStatus('fallback', { code: 'NO_API_CONFIG', message: 'AI 已开启，但缺少可用 Provider，本回合裁决已保留，等待重试。' });
     state.api.lastStatus = 'offline'; state.api.lastErrorCode = 'NO_API_CONFIG';
     return null;
   }
   const requestedAt = Date.now();
   state.api.lastRequestAt = requestedAt;
-  Story.setAIStatus('requesting', { message: '正在请求 AI 叙事……', lastRequestAt: requestedAt });
+  setStatus('requesting', { message: '正在请求 AI 叙事……', lastRequestAt: requestedAt });
   try {
-    brief.enforcePublishGate = !!(Story.ai.providerMeta && Story.ai.providerMeta.enforcePublishGate);
+    brief.enforcePublishGate = !!(providerContext.providerMeta && providerContext.providerMeta.enforcePublishGate);
     const ctx = Story.Provider._briefToCtx(state, brief);
-    const providerName = Story.ai.providerMeta && Story.ai.providerMeta.provider || '';
+    const providerName = providerContext.providerMeta && providerContext.providerMeta.provider || '';
     // 无 meta 的 Provider 是 V3.3 旧插件/单元测试兼容路径；浏览器与服务端正式 Provider 都必须提供名称并执行语义校验。
-    const skipSemanticValidation = !providerName || /^mock(?:-|$)/.test(providerName) || Story.ai.providerMeta && Story.ai.providerMeta.skipSemanticValidation;
+    const skipSemanticValidation = !providerName || /^mock(?:-|$)/.test(providerName) || providerContext.providerMeta && providerContext.providerMeta.skipSemanticValidation;
     state.api.lastNarrationObservation = {
       providerName: providerName,
       skipSemanticValidation: !!skipSemanticValidation,
@@ -6244,10 +6745,11 @@ Story.Provider.narrate = async function (state, brief) {
     await Story.Narration.emitDebug({ stage: 'context', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', contract: brief.turnContract, context: ctx });
     // 最多两次：首次失败（空响应或字段不合规）自动重试一次（V3 §13 协议重试）
     for (let attempt = 0; attempt < 2; attempt++) {
-      const wrapped = await Story.ai._withTimeout(Story.ai.provider.narrate(ctx), Story.ai.timeoutMs);
+      const wrapped = await Story.Provider._withTimeout(providerContext, providerContext.provider.narrate(ctx));
+      if (wrapped && wrapped.__providerError) throw wrapped.__providerError;
       // 超时：已等待完整超时窗口，不重试，直接降级
       if (wrapped && wrapped.__timeout) {
-        Story.setAIStatus('fallback', { code: 'TIMEOUT', message: 'API 请求超时，本回合裁决已保留，等待重试。', lastRequestAt: requestedAt });
+        setStatus('fallback', { code: 'TIMEOUT', message: 'API 请求超时，本回合裁决已保留，等待重试。', lastRequestAt: requestedAt });
         state.api.lastStatus = 'offline'; state.api.lastErrorCode = 'TIMEOUT';
         return null;
       }
@@ -6256,12 +6758,12 @@ Story.Provider.narrate = async function (state, brief) {
       await Story.Narration.emitDebug({ stage: 'raw', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', attempt: attempt + 1, raw: raw });
       state.api.lastResponseAt = Date.now();
       if (!raw) {
-        if (attempt === 0) { Story.setAIStatus('received', { message: '首次响应为空，自动重试一次。', lastRequestAt: requestedAt }); continue; }
-        Story.setAIStatus('fallback', { code: 'EMPTY_RESPONSE', message: 'API 返回空内容，本回合裁决已保留，等待重试。', lastRequestAt: requestedAt });
+        if (attempt === 0) { setStatus('received', { message: '首次响应为空，自动重试一次。', lastRequestAt: requestedAt }); continue; }
+        setStatus('fallback', { code: 'EMPTY_RESPONSE', message: 'API 返回空内容，本回合裁决已保留，等待重试。', lastRequestAt: requestedAt });
         state.api.lastStatus = 'offline'; state.api.lastErrorCode = 'EMPTY_RESPONSE';
         return null;
       }
-      Story.setAIStatus('received', { message: attempt === 0 ? '已收到 API 响应，正在校验。' : '已收到重试响应，正在校验。', lastRequestAt: requestedAt });
+      setStatus('received', { message: attempt === 0 ? '已收到 API 响应，正在校验。' : '已收到重试响应，正在校验。', lastRequestAt: requestedAt });
       const parsed = Story.Provider.parseNarrationResponse(raw);
       parsed.finishReason = parsed.finishReason || finishReason;
       if (state.api.lastNarrationObservation) {
@@ -6277,9 +6779,9 @@ Story.Provider.narrate = async function (state, brief) {
             requiredRepairs: errors.slice(), previousOutputPreview: String(parsed.chapter || '').slice(0, 500),
           };
           await Story.Narration.emitDebug({ stage: 'correction', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', correction: ctx.protocolCorrection });
-          Story.setAIStatus('received', { message: '检测到格式偏差，自动修复格式后重试。', errors: errors, lastRequestAt: requestedAt }); continue;
+          setStatus('received', { message: '检测到格式偏差，自动修复格式后重试。', errors: errors, lastRequestAt: requestedAt }); continue;
         }
-        Story.setAIStatus('fallback', { code: 'INVALID_SCHEMA', message: 'AI 返回字段不合规，本回合裁决已保留，等待重试。', errors: errors, lastRequestAt: requestedAt });
+        setStatus('fallback', { code: 'INVALID_SCHEMA', message: 'AI 返回字段不合规，本回合裁决已保留，等待重试。', errors: errors, lastRequestAt: requestedAt });
         state.api.lastStatus = 'offline'; state.api.lastErrorCode = 'INVALID_SCHEMA'; state.api.lastErrorMessage = errors.join('；');
         return null;
       }
@@ -6295,12 +6797,12 @@ Story.Provider.narrate = async function (state, brief) {
           };
           state.api.lastSemanticRepair = { status: 'started', turnId: brief.turnContract && brief.turnContract.turnId || '', errors: ctx.protocolCorrection.previousErrors, startedAt: Date.now() };
           await Story.Narration.emitDebug({ stage: 'correction', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', correction: ctx.protocolCorrection });
-          Story.setAIStatus('received', { message: '章节语义与本地事实契约不符，正在自动修复一次。', errors: semanticErrors, lastRequestAt: requestedAt });
+          setStatus('received', { message: '章节语义与本地事实契约不符，正在自动修复一次。', errors: semanticErrors, lastRequestAt: requestedAt });
           continue;
         }
         const violation = semanticErrors[0];
         state.api.lastSemanticRepair = { status: 'failed', turnId: brief.turnContract && brief.turnContract.turnId || '', errors: semanticErrors, finishedAt: Date.now() };
-        Story.setAIStatus('fallback', { code: violation.code, message: violation.message, errors: semanticErrors, lastRequestAt: requestedAt });
+        setStatus('fallback', { code: violation.code, message: violation.message, errors: semanticErrors, lastRequestAt: requestedAt });
         state.api.lastStatus = 'offline'; state.api.lastErrorCode = violation.code; state.api.lastErrorMessage = violation.message;
         return null;
       }
@@ -6312,13 +6814,13 @@ Story.Provider.narrate = async function (state, brief) {
       }
       state.api.lastStatus = 'ok'; state.api.lastErrorCode = null; state.api.lastErrorMessage = '';
       const msg = parsed._autoFixed ? '已自动修复格式并采用 API 正文。' : '已采用 API 正文。';
-      Story.setAIStatus('success', { message: msg, lastRequestAt: requestedAt });
+      setStatus('success', { message: msg, lastRequestAt: requestedAt });
       return { title: parsed.title, chapter: parsed.chapter, dialogues: parsed.dialogues, endingImage: parsed.endingImage, audit: parsed.audit || null, finishReason: parsed.finishReason || '', _autoFixed: !!parsed._autoFixed };
     }
     return null;
   } catch (e) {
     const code = Story.Provider._classifyError(e && e.message);
-    Story.setAIStatus('fallback', { code: code, message: 'AI 文本生成失败，本回合裁决已保留，等待重试。' + (e && e.message ? '原因：' + e.message : ''), error: e && e.message, lastRequestAt: requestedAt });
+    setStatus('fallback', { code: code, message: 'AI 文本生成失败，本回合裁决已保留，等待重试。' + (e && e.message ? '原因：' + e.message : ''), error: e && e.message, lastRequestAt: requestedAt });
     state.api.lastStatus = 'offline'; state.api.lastErrorCode = code; state.api.lastErrorMessage = (e && e.message) || '';
     return null;
   }
@@ -6338,7 +6840,7 @@ Story.Provider._classifyError = function (msg) {
   return 'NETWORK_ERROR';
 };
 
-Story.Provider._briefToCtx = function (state, brief) {
+Story.Provider._briefToCtxLegacyV332 = function (state, brief) {
   // V3.3.2 修复：传入完整 action 详情与 publicDelta，让 AI 知道本回合"既定事实"
   var env = brief._envelope;
   var chosenActions = (env && env.actions) ? env.actions.map(function (a) {
@@ -6479,7 +6981,7 @@ Story.Provider._mergeChapter = function (ch) {
   return ch;
 };
 
-Story.Provider.parseNarrationResponse = function (rawText) {
+Story.Provider._parseNarrationResponseV341 = function (rawText) {
   let autoFixed = false;
   if (rawText && typeof rawText === 'object' && !Array.isArray(rawText)) {
     if (rawText.chapter != null && typeof rawText.chapter !== 'string') {
@@ -6534,7 +7036,6 @@ Story.Provider.parseNarrationResponse = function (rawText) {
 };
 
 /* 保留审计区与 Provider finish_reason，但后续组装仍只采纳文案字段。 */
-Story.Provider._parseNarrationResponseV341 = Story.Provider.parseNarrationResponse;
 Story.Provider.parseNarrationResponse = function (rawText) {
   var parsed = Story.Provider._parseNarrationResponseV341(rawText);
   var metadata = rawText && typeof rawText === 'object' ? rawText : null;
@@ -6659,20 +7160,26 @@ Story.ai = {
   },
 };
 
-Story.setAIStatus = function (state, details) {
+Story._setAIStatusOn = function (providerContext, state, details) {
+  providerContext = providerContext || Story.ai;
   details = details || {};
-  const previous = Story.ai.status || {};
-  Story.ai.status = {
+  const previous = providerContext.status || {};
+  providerContext.status = {
     state: state, code: details.code || state, message: details.message || '', error: details.error || '',
-    provider: Story.ai.providerMeta.provider || '', model: Story.ai.providerMeta.model || '', base: Story.ai.providerMeta.base || '',
+    provider: providerContext.providerMeta && providerContext.providerMeta.provider || '', model: providerContext.providerMeta && providerContext.providerMeta.model || '', base: providerContext.providerMeta && providerContext.providerMeta.base || '',
     updatedAt: Date.now(), lastRequestAt: details.lastRequestAt || previous.lastRequestAt || 0,
     lastSuccessAt: state === 'success' ? Date.now() : (previous.lastSuccessAt || 0),
   };
-  Story.ai._listeners.slice().forEach(function (listener) { try { listener(Story.getAIStatus()); } catch (e) {} });
-  return Story.ai.status;
+  (providerContext._listeners || []).slice().forEach(function (listener) { try { listener(Story._clone(providerContext.status)); } catch (e) {} });
+  return providerContext.status;
 };
 
-Story.getAIStatus = function () { return Story._clone(Story.ai.status); };
+Story.setAIStatus = function (state, details) { return Story._setAIStatusOn(Story.ai, state, details); };
+Story.setAIStatusFor = function (storyState, state, details) { return Story._setAIStatusOn(Story.providerFor(storyState), state, details); };
+Story.getAIStatus = function (storyState) {
+  var providerContext = storyState ? Story.providerFor(storyState) : Story.ai;
+  return Story._clone(providerContext && providerContext.status || Story.ai.status);
+};
 Story.onAIStatus = function (listener) {
   if (typeof listener !== 'function') return function () {};
   Story.ai._listeners.push(listener);
@@ -6992,6 +7499,7 @@ Story.getPublicStoryView = function (storyState) {
   if (!storyState) return null;
   const ch = storyState.story.currentChapter;
   const scene = storyState.story.currentScene;
+  const pending = storyState.story.pendingResolution;
   return {
     chapterId: ch ? ch.chapterId : null,
     chapterIndex: storyState.story.chapterIndex || 0,
@@ -7001,13 +7509,18 @@ Story.getPublicStoryView = function (storyState) {
     dialogues: ch && Array.isArray(ch.dialogues) ? Story._clone(ch.dialogues) : [],
     endingImage: ch ? (ch.endingImage || '') : '',
     turnPhase: storyState.story.turnPhase || 'collecting',
+    resolutionEcho: pending && pending.resolutionEcho && pending.resolutionEcho.actions && pending.resolutionEcho.actions.length
+      ? Story._clone(pending.resolutionEcho) : null,
     year: storyState.world.year,
     worldName: storyState.world.name,
     worldBible: Story._clone(storyState.world.worldBible),
+    worldRules: Story.WorldRules.explain(storyState),
+    worldEventWeights: Story.WorldRules.eventWeights(storyState),
     publicFacts: (storyState.world.publicFacts || []).slice(-8),
     publicRumors: (storyState.world.publicRumors || []).slice(-6),
     chronicleEntries: (storyState.story.chronicle || []).slice(-15),
     factions: (storyState.world.factions || []).slice(),
+    factionHistory: (storyState.world.factionHistory || []).slice(-8),
     relics: (storyState.ledger.relics || []).slice(),
     activeThreads: (storyState.story.activeThreads || []).slice(-8),
     scene: scene ? {

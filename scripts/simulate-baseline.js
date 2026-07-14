@@ -47,10 +47,7 @@ function percentile(values, ratio) {
   return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * ratio))];
 }
 
-async function main() {
-  const seed = readArg('seed', 'V343-BASELINE');
-  const turns = Math.max(1, Number(readArg('turns', '30')) || 30);
-  const quiet = process.argv.indexOf('--quiet') >= 0;
+async function simulate(seed, turns) {
   let providerCalls = 0;
   Story.setAIEnabled(true);
   Story.registerAIProvider({ narrate: async function (ctx) {
@@ -65,11 +62,16 @@ async function main() {
   } }, { provider: 'mock-simulation', model: 'deterministic-prose-baseline', skipSemanticValidation: true });
 
   const startedAt = Date.now();
-  const state = await Story.createSession({ seed: seed, narrativeProfile: 'immersive', pvpMode: 'dramatic', actors: [
+  const state = await Story.createSession({ seed: seed, narrativeProfile: 'immersive', pvpMode: 'dramatic', skipOpening: true, actors: [
     { id: 'normal', name: '阿悟', seatId: 'seat_0', controller: 'human', identity: '谨慎调查者', daoPath: '阵修' },
     { id: 'aggressive', name: '阿萝', seatId: 'seat_1', controller: 'human', identity: '好战行者', daoPath: '剑修' },
     { id: 'imaginative', name: '阿客', seatId: 'seat_2', controller: 'human', identity: '跳脱散修', daoPath: '杂学' },
   ] });
+  const candidates = Story.Director.generateCandidates(state);
+  state.story.director.candidates = candidates;
+  state.story.director.phase = 'voting';
+  Story.Director.activateArc(state, candidates[0].arcId);
+  await Story._generateOpening(state);
 
   const actorIds = ['normal', 'aggressive', 'imaginative'];
   const chapterMetrics = [];
@@ -77,6 +79,10 @@ async function main() {
   let actionCount = 0;
   let interactionCount = 0;
   let narrationFailures = 0;
+  let arcIdleTurns = 0;
+  let currentIdleStreak = 0;
+  let longestArcIdleStreak = 0;
+  const activatedArcIds = new Set([state.story.director.activeArc.arcId]);
   for (let turn = 0; turn < turns; turn++) {
     const submissions = {};
     actorIds.forEach(function (actorId, actorIndex) {
@@ -95,6 +101,14 @@ async function main() {
     interactionCount += (envelope.interactions || []).length;
     (envelope.actions || []).forEach(function (action) { categoryCounts[action.category] = (categoryCounts[action.category] || 0) + 1; });
     if (state.story.currentChapter && state.story.currentChapter.narrativeMetrics) chapterMetrics.push(state.story.currentChapter.narrativeMetrics);
+    const director = state.story.director;
+    if (director.activeArc) activatedArcIds.add(director.activeArc.arcId);
+    if (director.phase !== 'active' && director.phase !== 'campaign_completed') {
+      arcIdleTurns++;
+      currentIdleStreak++;
+      longestArcIdleStreak = Math.max(longestArcIdleStreak, currentIdleStreak);
+    } else currentIdleStreak = 0;
+    if (director.phase === 'campaign_completed') break;
   }
 
   const lengths = chapterMetrics.map(function (metrics) { return metrics.charCount; });
@@ -108,7 +122,7 @@ async function main() {
   });
   const average = function (values) { return values.length ? Number((values.reduce(function (sum, value) { return sum + value; }, 0) / values.length).toFixed(1)) : 0; };
   const result = {
-    simulationVersion: '1.0',
+    simulationVersion: '2.0',
     storyVersion: Story.VERSION,
     seed: seed,
     narrativeProfile: state.settings.narrativeProfile,
@@ -120,6 +134,24 @@ async function main() {
     interactionCount: interactionCount,
     categoryCounts: categoryCounts,
     narrationFailures: narrationFailures,
+    director: {
+      activatedArcCount: activatedArcIds.size,
+      completedArcCount: (state.story.director.completedArcs || []).length,
+      arcIdleTurns: arcIdleTurns,
+      longestArcIdleStreak: longestArcIdleStreak,
+      campaignStatus: state.story.director.campaign && state.story.director.campaign.status || 'inactive',
+      campaignEnding: state.story.director.campaign && state.story.director.campaign.ending || null,
+      campaignClock: state.story.director.campaign && state.story.director.campaign.clock || null,
+    },
+    worldRules: {
+      triggeredRuleCount: Story.WorldRules.explain(state).filter(function (rule) { return rule.triggerCount > 0; }).length,
+      totalTriggers: Story.WorldRules.explain(state).reduce(function (sum, rule) { return sum + rule.triggerCount; }, 0),
+      eventWeightCount: Object.keys(Story.WorldRules.eventWeights(state)).length,
+    },
+    factions: {
+      actionCount: (state.world.factionHistory || []).length,
+      changedFactionCount: (state.world.factions || []).filter(function (faction) { return faction.power !== 50 || faction.control > 0 || faction.resources > 0; }).length,
+    },
     prose: {
       averageChapterLength: average(lengths),
       p50ChapterLength: percentile(lengths, 0.5),
@@ -136,8 +168,44 @@ async function main() {
       qualityHistorySize: (state.story.narrativeQualityHistory || []).length,
     },
   };
-  if (quiet) console.log(JSON.stringify(result));
-  else console.log('V3.4.3 deterministic baseline\n' + JSON.stringify(result, null, 2));
+  return result;
+}
+
+async function main() {
+  const baseSeed = readArg('seed', 'V343-BASELINE');
+  const turns = Math.max(1, Number(readArg('turns', '30')) || 30);
+  const seedCount = Math.max(1, Number(readArg('seeds', '1')) || 1);
+  const quiet = process.argv.indexOf('--quiet') >= 0;
+  const results = [];
+  for (let index = 0; index < seedCount; index++) {
+    results.push(await simulate(seedCount === 1 ? baseSeed : baseSeed + '-' + String(index + 1).padStart(3, '0'), turns));
+  }
+  if (seedCount === 1) {
+    if (quiet) console.log(JSON.stringify(results[0]));
+    else console.log('V3.4.3 deterministic baseline\n' + JSON.stringify(results[0], null, 2));
+    return;
+  }
+  const summary = {
+    simulationVersion: '2.0',
+    seedPrefix: baseSeed,
+    seedCount: seedCount,
+    turnsPerSeed: turns,
+    totalTurnsCompleted: results.reduce(function (sum, result) { return sum + result.turnsCompleted; }, 0),
+    campaignEndings: results.reduce(function (counts, result) {
+      const type = result.director.campaignEnding && result.director.campaignEnding.type || 'none';
+      counts[type] = (counts[type] || 0) + 1;
+      return counts;
+    }, {}),
+    maxArcIdleStreak: Math.max.apply(Math, results.map(function (result) { return result.director.longestArcIdleStreak; })),
+    averageActivatedArcs: Number((results.reduce(function (sum, result) { return sum + result.director.activatedArcCount; }, 0) / seedCount).toFixed(2)),
+    narrationFailures: results.reduce(function (sum, result) { return sum + result.narrationFailures; }, 0),
+    averageWorldRuleTriggers: Number((results.reduce(function (sum, result) { return sum + result.worldRules.totalTriggers; }, 0) / seedCount).toFixed(2)),
+    averageFactionActions: Number((results.reduce(function (sum, result) { return sum + result.factions.actionCount; }, 0) / seedCount).toFixed(2)),
+    results: quiet ? undefined : results,
+  };
+  console.log(JSON.stringify(summary, null, quiet ? 0 : 2));
 }
 
 main().catch(function (error) { console.error(error && error.stack || error); process.exitCode = 1; });
+
+module.exports = { simulate: simulate };

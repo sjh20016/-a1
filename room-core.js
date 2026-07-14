@@ -26,6 +26,10 @@ const Room = {};
     ? require('./story-core.js')
     : (typeof globalThis !== 'undefined' ? globalThis.Story : null);
   if (!Story) throw new Error('story-core.js must be loaded before room-core.js');
+  var StoryEngine = (typeof module !== 'undefined' && module.exports && typeof require === 'function')
+    ? require('./src/application/story-engine.js')
+    : (typeof globalThis !== 'undefined' ? globalThis.StoryEngine : null);
+  if (!StoryEngine) throw new Error('story-engine.js must be loaded before room-core.js');
 
   Room.VERSION = '3.4.2';
   Room.MAX_SEATS = 4;
@@ -125,18 +129,18 @@ const Room = {};
 
   var _rooms = new Map();
 
-  Room.SerialQueue = function () { this.tail = Promise.resolve(); };
-  Room.SerialQueue.prototype.run = function (fn) {
-    var next = this.tail.then(fn, fn);
-    this.tail = next.catch(function () {});
-    return next;
-  };
-  // Story 仍有全局 state/RNG/Provider，因此所有房间共用一条执行队列。
-  Room.storyExecutionQueue = new Room.SerialQueue();
-  Room.runStoryTask = function (fn) {
-    // 全局串行是服务端多房间保护；浏览器本地单房直接执行，避免跨 realm Promise 队列阻塞 UI 事件循环。
-    var isNodeRuntime = typeof module !== 'undefined' && module.exports;
-    return isNodeRuntime ? Room.storyExecutionQueue.run(fn) : fn();
+  // 运行时对象不进入房间快照；同房间由 engine.queue 串行，不同房间可并行等待 Provider。
+  var _engineByRoom = typeof WeakMap !== 'undefined' ? new WeakMap() : new Map();
+  Room.getStoryEngine = function (room) {
+    if (!room) throw new Error('房间不存在');
+    var engine = _engineByRoom.get(room);
+    if (!engine) {
+      engine = StoryEngine.create({ id: 'engine_' + room.roomId, state: room.storySession || null });
+      _engineByRoom.set(room, engine);
+    } else if (room.storySession && engine.state !== room.storySession) {
+      engine.attach(room.storySession);
+    }
+    return engine;
   };
 
   Room.coordinator = {
@@ -268,13 +272,14 @@ const Room = {};
             roomDisplayName: s.displayName,
           });
         });
-        var storyState = await Room.runStoryTask(function () { return Story.createSession({
+        var engine = Room.getStoryEngine(room);
+        var storyState = await engine.createSession({
           seed: room.settings.seed || undefined,
           actors: actors,
           narrativePace: room.settings.narrativePace,
           narrativeProfile: room.settings.narrativeProfile,
           pvpMode: room.settings.pvpMode,
-        }); });
+        });
         room.storySession = storyState;
         storyState.roomId = room.roomId;
         // 绑定 actorId 到 seat
@@ -331,14 +336,15 @@ const Room = {};
           });
         });
         // 跳过开局生成，等待投票后激活
-        var storyState = await Room.runStoryTask(function () { return Story.createSession({
+        var engine = Room.getStoryEngine(room);
+        var storyState = await engine.createSession({
           seed: room.settings.seed || undefined,
           actors: actors,
           narrativePace: room.settings.narrativePace,
           narrativeProfile: room.settings.narrativeProfile,
           pvpMode: room.settings.pvpMode,
           skipOpening: true,
-        }); });
+        });
         room.storySession = storyState;
         storyState.roomId = room.roomId;
         occupied.forEach(function (s) {
@@ -410,7 +416,7 @@ const Room = {};
       room.directorVote.finalizedAt = Date.now();
       room.directorVote.selectedArcId = winner;
       // 激活卷纲 → 生成开局场景与叙事
-      await Room.runStoryTask(function () { return Story.Director.finalizeSessionWithArc(state, winner); });
+      await Room.getStoryEngine(room).finalizeSessionWithArc(winner);
       // 正常开局流程
       room.status = 'generating';
       var openPhase = Story.getTurnPhase(state);
@@ -552,6 +558,7 @@ const Room = {};
       // 恢复 Story RNG
       if (room.storySession) {
         Story._activateState(room.storySession);
+        Room.getStoryEngine(room).attach(room.storySession);
       }
       _rooms.set(room.roomId, room);
       return room;
@@ -744,9 +751,7 @@ const Room = {};
     _logEvent(room, { type: 'NARRATION_STARTED', visibility: 'public', payload: { round: room.turn.round } });
     try {
       var actions = Object.assign({}, room.turn.actionsByActorId);
-      await Room.runStoryTask(function () {
-        return Story.resolveTurn(room.storySession, actions, { beforeNarration: room._beforeNarration });
-      });
+      await Room.getStoryEngine(room).resolveTurn(actions, { beforeNarration: room._beforeNarration });
       _logNarrationRepairEvents(room);
       // V3.3.1：resolveTurn 成功返回后，根据 turnPhase 判断结果
       var phase = Story.getTurnPhase(room.storySession);
@@ -798,7 +803,7 @@ const Room = {};
   async function _retryNarration(room, options) {
     room.turn.lastError = null;
     try {
-      await Room.runStoryTask(function () { return Story.retryNarration(room.storySession, options); });
+      await Room.getStoryEngine(room).retryNarration(options);
       _logNarrationRepairEvents(room);
       var phase = Story.getTurnPhase(room.storySession);
       if (phase === 'narration_failed' || phase === 'awaiting_narration') {

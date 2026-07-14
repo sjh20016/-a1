@@ -703,9 +703,10 @@ input,textarea,select{font-family:inherit;color:var(--text)}
   </div>
 </div>
 
-<script src="story-core.js?v=3.4.1"></script>
-<script src="room-core.js?v=3.4.1"></script>
-<script src="public/online-client.js?v=3.4.1"></script>
+<script src="story-core.js?v=3.4.2"></script>
+<script src="src/application/story-engine.js?v=3.4.2"></script>
+<script src="room-core.js?v=3.4.2"></script>
+<script src="public/online-client.js?v=3.4.2"></script>
 <script>
 /* ============================================================
  * V3 UI 控制层
@@ -1811,6 +1812,16 @@ UI.renderOnlineView = function (view) {
 
   if (view.publicStory && view.publicStory.chapter) {
     html += '<div class="online-card"><h3>' + UI.esc(view.publicStory.title || '本章') + '</h3><div class="online-chapter">' + UI.esc(view.publicStory.chapter) + '</div></div>';
+  }
+
+  if (view.publicStory && view.publicStory.resolutionEcho) {
+    html += '<div class="online-card"><h3>裁决回响</h3><p class="online-meta">本地结果已经锁定，正式章节仍在天机演算中。</p><div class="online-options">';
+    (view.publicStory.resolutionEcho.actions || []).forEach(function (echo) {
+      var target = echo.targetName ? ' → ' + echo.targetName : '';
+      var cost = echo.costs && echo.costs.length ? '<br><span class="online-meta">代价：' + UI.esc(echo.costs.join('；')) + '</span>' : '';
+      html += '<div class="online-option"><b>' + UI.esc(echo.actorName) + '</b> · ' + UI.esc(echo.actionText) + UI.esc(target) + '<br><span class="online-meta">' + UI.esc(echo.outcomeLabel || echo.outcome || '已裁决') + '</span>' + cost + '</div>';
+    });
+    html += '</div></div>';
   }
 
   if (room.status === 'collecting' && view.ownActor) {

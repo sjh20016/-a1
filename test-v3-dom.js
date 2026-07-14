@@ -17,6 +17,7 @@ function ok(name, cond, extra) {
 (async function () {
   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
   const storyJs = fs.readFileSync(path.join(__dirname, 'story-core.js'), 'utf8');
+  const engineJs = fs.readFileSync(path.join(__dirname, 'src/application/story-engine.js'), 'utf8');
   const roomJs = fs.readFileSync(path.join(__dirname, 'room-core.js'), 'utf8');
 
   const dom = new JSDOM(html, {
@@ -45,6 +46,7 @@ function ok(name, cond, extra) {
     return code + '\n;try{window.Story=Story;}catch(e){}';
   };
   window.eval(wrap(storyJs));
+  window.eval(engineJs);
   // room-core.js 依赖全局 Story（已在上一行挂到 window）
   window.eval(roomJs + '\n;try{window.Room=Room;}catch(e){}');
   // 执行 index.html 内联脚本（最后一段 <script>）

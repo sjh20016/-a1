@@ -1,0 +1,19 @@
+{
+  "generatedOn": "2026-07-14",
+  "command": "npm run simulate -- --seed PHASE2-ACCEPTANCE --seeds 100 --turns 30 --quiet",
+  "simulationVersion": "2.0",
+  "storyVersion": "3.4.2",
+  "seedPrefix": "PHASE2-ACCEPTANCE",
+  "seedCount": 100,
+  "turnsPerSeed": 30,
+  "totalTurnsCompleted": 2335,
+  "campaignEndings": {
+    "success": 98,
+    "cost": 2
+  },
+  "maxArcIdleStreak": 1,
+  "averageActivatedArcs": 3,
+  "narrationFailures": 0,
+  "averageWorldRuleTriggers": 63.48,
+  "averageFactionActions": 23.35
+}
