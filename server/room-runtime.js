@@ -126,18 +126,21 @@ class RoomRuntime {
     var sockets = this.socketsByRoom.get(meta.roomId);
     if (sockets) sockets.delete(socket);
     this.socketMeta.delete(socket);
-    var room = this.Room.coordinator.getRoom(meta.roomId);
-    if (!room) return;
-    var stillConnected = sockets && Array.from(sockets).some(function (candidate) {
-      var candidateMeta = this.socketMeta.get(candidate);
-      return candidateMeta && candidateMeta.seatId === meta.seatId;
-    }, this);
-    if (!stillConnected) {
-      var seat = room.seats.find(function (item) { return item.seatId === meta.seatId; });
-      if (seat) seat.connectionStatus = 'disconnected';
-      await this.persist(room);
-      this.broadcastRoomViews(room);
-    }
+    var self = this;
+    await this.withRoomLock(meta.roomId, async function () {
+      var room = self.Room.coordinator.getRoom(meta.roomId);
+      if (!room) return;
+      var stillConnected = sockets && Array.from(sockets).some(function (candidate) {
+        var candidateMeta = self.socketMeta.get(candidate);
+        return candidateMeta && candidateMeta.seatId === meta.seatId;
+      });
+      if (!stillConnected) {
+        var seat = room.seats.find(function (item) { return item.seatId === meta.seatId; });
+        if (seat) seat.connectionStatus = 'disconnected';
+        await self.persist(room);
+        self.broadcastRoomViews(room);
+      }
+    });
   }
 
   _assertHost(room, message) {

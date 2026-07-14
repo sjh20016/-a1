@@ -1621,7 +1621,7 @@ UI.renderAIStatus = function (status) {
 };
 UI.syncAI = function () {
   Story.setAIEnabled(!!UI.settings.aiOn);
-  var meta = { provider: 'openai-compatible', base: UI.settings.base, model: UI.settings.model };
+  var meta = { provider: 'openai-compatible', base: UI.settings.base, model: UI.settings.model, enforcePublishGate: true };
   if (UI.settings.aiOn && UI.settings.base && Story.getApiKey()) Story.registerAIProvider(UI._buildAIProvider(), meta);
   else Story.registerAIProvider(null, meta);
   UI.renderAIStatus(Story.getAIStatus());

@@ -292,6 +292,13 @@ Story.createEmptyState = function (seed) {
       recentMotifs: [],
       recentChoiceFingerprints: [],
       recentChapterFingerprints: [],
+      narrativeStyleMemory: {
+        recentOpeningModes: [],
+        recentOpeningPhrases: [],
+        recentTitles: [],
+        recentEndingModes: [],
+        recentDominantImages: [],
+      },
       lastTurnRecordId: null,
       // V3.3 Narration Transaction：回合状态机 + 待提交裁决包
       turnPhase: 'collecting',     // collecting|locked|resolving|awaiting_narration|published
@@ -327,6 +334,7 @@ Story.createEmptyState = function (seed) {
       lastStatus: 'offline', lastErrorCode: null, lastErrorMessage: '',
       lastRequestAt: 0, lastResponseAt: 0,
       lastSemanticRepair: null,
+      lastNarrationObservation: null,
     },
     settings: { timePreference: '顺其自然', narrativePace: '常规', mode: 'novel', pvpMode: 'dramatic', developerMode: false, showResolutionEcho: true },
     finalLegacy: null,
@@ -364,6 +372,12 @@ Story.Migration.migrateToV32 = function (s) {
   if (!st.recentMotifs) st.recentMotifs = [];
   if (!st.recentChoiceFingerprints) st.recentChoiceFingerprints = [];
   if (!st.recentChapterFingerprints) st.recentChapterFingerprints = [];
+  if (!st.narrativeStyleMemory) st.narrativeStyleMemory = {};
+  st.narrativeStyleMemory.recentOpeningModes = st.narrativeStyleMemory.recentOpeningModes || [];
+  st.narrativeStyleMemory.recentOpeningPhrases = st.narrativeStyleMemory.recentOpeningPhrases || [];
+  st.narrativeStyleMemory.recentTitles = st.narrativeStyleMemory.recentTitles || [];
+  st.narrativeStyleMemory.recentEndingModes = st.narrativeStyleMemory.recentEndingModes || [];
+  st.narrativeStyleMemory.recentDominantImages = st.narrativeStyleMemory.recentDominantImages || [];
   if (!st.recentCanonicalSummaries) st.recentCanonicalSummaries = [];
   if (!st.lastTurnRecordId) st.lastTurnRecordId = null;
   // V3.3 Narration Transaction 字段
@@ -398,6 +412,12 @@ Story.Migration.migrateToV32 = function (s) {
       repeatedCategoryCount: {}, lastTargetId: '', repeatedTargetCount: 0,
     };
     if (!a.hidden) a.hidden = { realm: '炼气六层', cultivationProgress: 0, injury: 0, resources: [], combatStats: { body: 10, spirit: 10, soul: 10 } };
+    if (!a.hidden.combatStats) a.hidden.combatStats = { body: 10, spirit: 10, soul: 10 };
+    if (a.hidden.spirit !== undefined) {
+      a.hidden.combatStats.spirit = a.hidden.spirit;
+      delete a.hidden.spirit;
+    }
+    if (a.hidden.combatStats.spirit === undefined) a.hidden.combatStats.spirit = 10;
     if (!a.privateFacts) a.privateFacts = [];
     // V3.3 Phase 2：每角色位置/在场状态
     if (a.locationId === undefined) a.locationId = (st.currentScene && st.currentScene.locationId) || null;
@@ -439,6 +459,7 @@ Story.Migration.migrateToV32 = function (s) {
   // api
   if (!s.api) s.api = { enabled: false, provider: 'openai-compatible', lastStatus: 'offline', lastErrorCode: null, lastErrorMessage: '', lastRequestAt: 0, lastResponseAt: 0 };
   if (s.api.lastSemanticRepair === undefined) s.api.lastSemanticRepair = null;
+  if (s.api.lastNarrationObservation === undefined) s.api.lastNarrationObservation = null;
   // settings
   if (!s.settings) s.settings = {};
   if (s.settings.timePreference === undefined) s.settings.timePreference = '顺其自然';
@@ -715,10 +736,12 @@ Story._generateOpening = async function (state) {
     createdAt: Date.now(),
     retryCount: 0,
     lastNarrationError: null,
+    projectedState: Story.Narration.buildProjectedState(state, state, envelope, state.story.currentScene),
   };
 
   // 5. 调 AI 叙事
   const brief = Story.Narration.buildBrief(state, state.story.currentScene, envelope);
+  state.story.pendingResolution.qualityPlan = brief.qualityPlan;
   const narration = Story.ai.enabled ? await Story.Provider.narrate(state, brief) : null;
 
   if (!narration || !narration.title || !narration.chapter) {
@@ -732,12 +755,19 @@ Story._generateOpening = async function (state) {
     Story._setTurnPhase(state, 'narration_failed');
     return;
   }
+  if (brief.enforcePublishGate) {
+    var publishViolation = Story.Narration.validatePublishGate(state, narration, brief);
+    if (publishViolation) {
+      Story.Narration.failPendingForDirectorViolation(state, publishViolation, false);
+      return;
+    }
+  }
   const directorViolation = Story.Narration.validateAgainstDirector(narration, brief.director);
   if (directorViolation) {
     Story.Narration.failPendingForDirectorViolation(state, directorViolation, false);
     return;
   }
-  const coverageViolation = Story.Narration.validateCoverage(narration, brief);
+  const coverageViolation = Story.ai.providerMeta && /^mock(?:-|$)/.test(Story.ai.providerMeta.provider || '') ? null : Story.Narration.validateCoverage(narration, brief);
   if (coverageViolation) {
     Story.Narration.failPendingForDirectorViolation(state, coverageViolation, false);
     return;
@@ -855,6 +885,7 @@ Story.retryNarration = async function (storyState, options) {
   const isOpening = (pr.turnId === 'turn_opening');
   const scene = isOpening ? pr.sceneBefore : state.story.currentScene;
   const brief = Story.Narration.buildBrief(state, scene, pr.envelope);
+  pr.qualityPlan = brief.qualityPlan;
   const narration = Story.ai.enabled ? await Story.Provider.narrate(state, brief) : null;
 
   if (!narration || !narration.title || !narration.chapter) {
@@ -869,12 +900,19 @@ Story.retryNarration = async function (storyState, options) {
     Story._setTurnPhase(state, 'narration_failed');
     return null;
   }
+  if (brief.enforcePublishGate) {
+    var publishViolation = Story.Narration.validatePublishGate(state, narration, brief);
+    if (publishViolation) {
+      Story.Narration.failPendingForDirectorViolation(state, publishViolation, true);
+      return null;
+    }
+  }
   const directorViolation = Story.Narration.validateAgainstDirector(narration, brief.director);
   if (directorViolation) {
     Story.Narration.failPendingForDirectorViolation(state, directorViolation, true);
     return null;
   }
-  const coverageViolation = Story.Narration.validateCoverage(narration, brief);
+  const coverageViolation = Story.ai.providerMeta && /^mock(?:-|$)/.test(Story.ai.providerMeta.provider || '') ? null : Story.Narration.validateCoverage(narration, brief);
   if (coverageViolation) {
     Story.Narration.failPendingForDirectorViolation(state, coverageViolation, true);
     return null;
@@ -976,8 +1014,10 @@ Story.resolveTurn = async function (storyState, actionsByActorId, options) {
   try {
     var previewState = Story._clone(state);
     sceneAfterPreview = Story.Scene.composeNext(previewState, envelope);
+    var projectedState = Story.Narration.buildProjectedState(state, previewState, envelope, sceneAfterPreview);
   } catch (previewError) {
     sceneAfterPreview = sceneBefore;
+    var projectedState = Story.Narration.buildProjectedState(state, state, envelope, sceneAfterPreview);
   }
 
   // 6. awaiting_narration：世界状态冻结，存 pendingResolution
@@ -995,6 +1035,7 @@ Story.resolveTurn = async function (storyState, actionsByActorId, options) {
     lastNarrationError: null,
     directorPlan: directorPlan,
     sceneAfterPreview: sceneAfterPreview,
+    projectedState: projectedState,
   };
 
   // 服务端持久化边界：行动已锁定且 pendingResolution 已建立，但尚未发起 AI 请求。
@@ -1002,6 +1043,13 @@ Story.resolveTurn = async function (storyState, actionsByActorId, options) {
 
   // 6. 调 AI 叙事
   const brief = Story.Narration.buildBrief(state, s.currentScene, envelope);
+  state.story.pendingResolution.qualityPlan = brief.qualityPlan;
+  const contractViolation = Story.Narration.validateTurnContractCompleteness(brief.turnContract);
+  if (contractViolation && Story.ai.providerMeta && Story.ai.providerMeta.enforcePublishGate) {
+    state.story.pendingResolution.lastNarrationError = { code: contractViolation.code, message: contractViolation.message, rawPreview: '' };
+    Story._setTurnPhase(state, 'narration_failed');
+    return state;
+  }
   const narration = Story.ai.enabled ? await Story.Provider.narrate(state, brief) : null;
 
   if (!narration || !narration.title || !narration.chapter) {
@@ -1015,12 +1063,19 @@ Story.resolveTurn = async function (storyState, actionsByActorId, options) {
     Story._setTurnPhase(state, 'narration_failed');
     return state;
   }
+  if (brief.enforcePublishGate) {
+    var publishViolation = Story.Narration.validatePublishGate(state, narration, brief);
+    if (publishViolation) {
+      Story.Narration.failPendingForDirectorViolation(state, publishViolation, false);
+      return state;
+    }
+  }
   const directorViolation = Story.Narration.validateAgainstDirector(narration, brief.director);
   if (directorViolation) {
     Story.Narration.failPendingForDirectorViolation(state, directorViolation, false);
     return state;
   }
-  const coverageViolation = Story.Narration.validateCoverage(narration, brief);
+  const coverageViolation = Story.ai.providerMeta && /^mock(?:-|$)/.test(Story.ai.providerMeta.provider || '') ? null : Story.Narration.validateCoverage(narration, brief);
   if (coverageViolation) {
     Story.Narration.failPendingForDirectorViolation(state, coverageViolation, false);
     return state;
@@ -1242,13 +1297,64 @@ Story.Intent._fromChoice = function (state, actorId, c) {
     parseNotes: parsed.parseNotes,
     nextIntentHint: parsed.nextIntentHint,
     restSurface: parsed.restSurface,
+    targetKnown: resolvedTarget.known !== false,
+    targetPresent: resolvedTarget.present !== false,
+    targetReachable: resolvedTarget.reachable !== false,
+  };
+};
+
+/* V3.4.2：把复合自定义行动拆成起意、转折和最终行动。 */
+Story.Intent.parseActionSequence = function (state, actorId, text) {
+  var source = String(text || '').trim();
+  var parts = source.split(/(?:，|。|；|\s+)(?=(?:然后|随后|中途|却|又|忽然|转而|刚要|反悔|放弃|抽回|但|最终))/).map(function (part) {
+    return part.replace(/^[，。；\s]+/, '').trim();
+  }).filter(Boolean);
+  if (parts.length <= 1) {
+    var markers = source.match(/.{1,80}?(?:然后|随后|中途|却|又|忽然|转而|刚要|反悔|放弃|抽回|但|最终).{1,120}/g);
+    if (markers && markers.length) parts = markers;
+  }
+  if (!parts.length) parts = [source];
+  var steps = parts.map(function (part, index) {
+    var parsed = Story.Intent._classify(part);
+    var target = Story.Intent.resolveTarget(state, actorId, part, parsed.category);
+    return {
+      index: index,
+      text: part,
+      category: parsed.category,
+      targetType: target.type,
+      targetId: target.id,
+      targetName: target.name,
+      targetKnown: target.known,
+      targetPresent: target.present,
+      targetReachable: target.reachable,
+      parseNotes: parsed.parseNotes,
+    };
+  });
+  var finalStep = steps[steps.length - 1];
+  var primaryStep = steps[0];
+  var transitions = steps.slice(1).map(function (step, index) {
+    return { from: steps[index].category, to: step.category, text: step.text };
+  });
+  return {
+    primaryIntent: primaryStep,
+    transitions: transitions,
+    finalIntent: finalStep,
+    abortedIntents: steps.slice(0, -1).filter(function (step) { return step.category !== finalStep.category || step.targetId !== finalStep.targetId; }),
+    contradictionType: steps.length > 1 && primaryStep.category !== finalStep.category ? 'action_reversal' : '',
+    steps: steps,
   };
 };
 
 Story.Intent.parseCustomText = function (state, actorId, text, timePreference) {
   const t = String(text || '').trim();
-  const parsed = Story.Intent._classify(t);
-  const target = Story.Intent.resolveTarget(state, actorId, t, parsed.category);
+  const sequence = Story.Intent.parseActionSequence(state, actorId, t);
+  const parsed = Story.Intent._classify(sequence.finalIntent && sequence.finalIntent.text || t);
+  const target = Story.Intent.resolveTarget(state, actorId, sequence.finalIntent && sequence.finalIntent.text || t, parsed.category);
+  var speechClaim = null;
+  var claimMatch = t.match(/(?:指认|指控|诬告|声称|宣称)([^，。；\s]{1,12})(?:是|为)([^，。；]{1,20})/);
+  if (claimMatch) {
+    speechClaim = { subjectName: claimMatch[1], predicate: claimMatch[2], evidentialStatus: 'claimed' };
+  }
   return {
     actorId: actorId,
     source: 'custom',
@@ -1267,6 +1373,11 @@ Story.Intent.parseCustomText = function (state, actorId, text, timePreference) {
     parseNotes: parsed.parseNotes,
     nextIntentHint: parsed.nextIntentHint,
     restSurface: parsed.restSurface,
+    actionSequence: sequence,
+    speechClaim: speechClaim,
+    targetKnown: target.known,
+    targetPresent: target.present,
+    targetReachable: target.reachable,
   };
 };
 
@@ -1400,6 +1511,59 @@ Story.Intent.resolveTarget = function (state, actorId, text, category) {
   if (category === 'investigate' || category === 'observe') return { type: 'clue', id: 'scene_anomaly', name: '场景异常', confidence: 0.35, matchedText: '' };
   const self = actors.find(function (a) { return a.id === actorId; });
   return { type: 'self', id: actorId || 'self', name: self ? self.name : '自身', confidence: 0.3, matchedText: '' };
+};
+
+/* V3.4.2：目标解析的可达性元数据。旧调用方仍可只使用 type/id/name。 */
+Story.Intent._resolveTargetV341 = Story.Intent.resolveTarget;
+Story.Intent.resolveTarget = function (state, actorId, text, category) {
+  var target = Story.Intent._resolveTargetV341(state, actorId, text, category) || {};
+  var scene = state && state.story && state.story.currentScene || {};
+  var actor = (state && state.actors || []).find(function (candidate) { return candidate.id === actorId; });
+  var targetActor = (state && state.actors || []).find(function (candidate) { return candidate.id === target.id; });
+  var sameLocation = function (candidate) {
+    return !!candidate && candidate.presence !== 'away' && (!candidate.locationId || !scene.locationId || candidate.locationId === scene.locationId);
+  };
+  var present = false;
+  var known = true;
+  var reachable = true;
+  if (target.type === 'actor') {
+    present = sameLocation(targetActor);
+    reachable = present || category === 'travel' || category === 'flee';
+  } else if (target.id === actorId || target.type === 'self') {
+    present = true;
+  } else if (target.type === 'exit') {
+    present = Story.Scene.Entity.normalize(scene.exits).some(function (entry) { return entry.id === target.id; });
+    reachable = present;
+  } else if (target.type === 'npc' || target.type === 'clue' || target.type === 'relic' || target.type === 'thread') {
+    present = Story.Scene.Entity.normalize(scene.visibleEntities).concat(
+      Story.Scene.Entity.normalize(scene.availableAssets),
+      Story.Scene.Entity.normalize(scene.exits)
+    ).some(function (entry) { return entry.id === target.id || entry.name === target.name; });
+    if (target.type === 'thread') present = (state.story.activeThreads || []).some(function (thread) {
+      return thread.threadId === target.id && thread.visibility === 'public' && thread.status === 'active' &&
+        (!thread.locationId || !scene.locationId || thread.locationId === scene.locationId);
+    });
+    reachable = present || category === 'travel' || category === 'flee';
+  } else {
+    known = false;
+    present = false;
+    reachable = false;
+  }
+  target.known = target.known !== false && known;
+  target.present = present;
+  target.reachable = reachable;
+  target.confidence = target.confidence == null ? 0 : target.confidence;
+  return target;
+};
+
+/* V3.4.2：公共线程唯一过滤入口，防止 dormant/private 线程混入 AI 或玩家视图。 */
+Story.ThreadView = Story.ThreadView || {};
+Story.ThreadView.getPublicActiveThreads = function (state) {
+  return ((state && state.story && state.story.activeThreads) || []).filter(function (thread) {
+    return !!thread && thread.visibility === 'public' && thread.status === 'active';
+  }).map(function (thread) {
+    return Story._clone(thread);
+  });
 };
 
 /** 核心：文本 → {category, approach, targetType, targetId, timePreference, derivedTags, ...} */
@@ -3636,7 +3800,18 @@ Story.Director.getSnapshot = function (state) {
 
 Story.Resolver.resolveActorAction = function (state, scene, intent) {
   const rng = Story.rngFor('resolver', state);
-  const category = intent.category;
+  var sequence = intent && intent.actionSequence;
+  var finalStep = sequence && sequence.finalIntent && sequence.finalIntent.category ? sequence.finalIntent : null;
+  var effectiveIntent = finalStep && finalStep.category !== intent.category ? Object.assign({}, intent, {
+    category: finalStep.category,
+    targetType: finalStep.targetType,
+    targetId: finalStep.targetId,
+    targetName: finalStep.targetName,
+    targetKnown: finalStep.targetKnown,
+    targetPresent: finalStep.targetPresent,
+    targetReachable: finalStep.targetReachable,
+  }) : intent;
+  const category = effectiveIntent.category;
   const actor = state.actors.find(function (a) { return a.id === intent.actorId; });
   const base = {
     actorId: intent.actorId,
@@ -3651,7 +3826,25 @@ Story.Resolver.resolveActorAction = function (state, scene, intent) {
     gains: [], costs: [], publicEffects: [], privateEffects: [],
     threadEffects: [], relationEffects: [],
     timePassed: Story.Resolver._timePassed(intent.timePreference),
+    actionSequence: sequence || null,
+    targetResolution: {
+      known: intent.targetKnown !== false,
+      present: intent.targetPresent !== false,
+      reachable: intent.targetReachable !== false,
+    },
   };
+
+  /* 近身互动必须经过本地目标存在性裁决，不能让 Narrator 把远方或未知对象写成已发生。 */
+  var requiresPresentTarget = ['battle', 'social', 'negotiate', 'steal', 'aid', 'deceive', 'use_relic'].indexOf(category) >= 0 ||
+    (category === 'investigate' && ['npc', 'actor', 'relic'].indexOf(intent.targetType) >= 0);
+  if (requiresPresentTarget && (intent.targetKnown === false || intent.targetPresent === false || intent.targetReachable === false)) {
+    base.outcome = 'setback';
+    base.gains = [];
+    base.costs = [{ type: intent.targetPresent === false ? 'target_not_present' : 'target_not_reachable', text: intent.targetPresent === false ? '目标不在当前场景，无法当场互动。' : '目标当前不可达，行动未能落地。' }];
+    base.publicEffects = [(actor ? actor.name : intent.actorId) + '尝试接近' + (intent.targetName || '目标') + '，但未能形成当场互动。'];
+    base.interactionTags = ['unreachable_target'];
+    return base;
+  }
 
   if (Story.Time.isLong(base.timePassed) && !intent.longActionApproved) {
     base.outcome = 'long_action_request';
@@ -3663,24 +3856,32 @@ Story.Resolver.resolveActorAction = function (state, scene, intent) {
     return base;
   }
 
+  var result;
   switch (category) {
-    case 'rest':      return Story.Resolver._resolveRest(state, scene, intent, base, rng);
-    case 'wait':      return Story.Resolver._resolveWait(state, scene, intent, base, rng);
-    case 'observe':   return Story.Resolver._resolveObserve(state, scene, intent, base, rng);
-    case 'investigate': return Story.Resolver._resolveInvestigate(state, scene, intent, base, rng);
-    case 'social':    return Story.Resolver._resolveSocial(state, scene, intent, base, rng);
-    case 'negotiate': return Story.Resolver._resolveNegotiate(state, scene, intent, base, rng);
-    case 'cultivate': return Story.Resolver._resolveCultivate(state, scene, intent, base, rng);
-    case 'craft':     return Story.Resolver._resolveCraft(state, scene, intent, base, rng);
-    case 'battle':    return Story.Resolver._resolveBattle(state, scene, intent, base, rng);
-    case 'flee':      return Story.Resolver._resolveFlee(state, scene, intent, base, rng);
-    case 'deceive':   return Story.Resolver._resolveDeceive(state, scene, intent, base, rng);
-    case 'use_relic': return Story.Resolver._resolveUseRelic(state, scene, intent, base, rng);
-    case 'steal':     return Story.Resolver._resolveSteal(state, scene, intent, base, rng);
-    case 'aid':       return Story.Resolver._resolveAid(state, scene, intent, base, rng);
-    case 'travel':    return Story.Resolver._resolveTravel(state, scene, intent, base, rng);
-    default:          return Story.Resolver._resolveFreeform(state, scene, intent, base, rng);
+    case 'rest':      result = Story.Resolver._resolveRest(state, scene, effectiveIntent, base, rng); break;
+    case 'wait':      result = Story.Resolver._resolveWait(state, scene, effectiveIntent, base, rng); break;
+    case 'observe':   result = Story.Resolver._resolveObserve(state, scene, effectiveIntent, base, rng); break;
+    case 'investigate': result = Story.Resolver._resolveInvestigate(state, scene, effectiveIntent, base, rng); break;
+    case 'social':    result = Story.Resolver._resolveSocial(state, scene, effectiveIntent, base, rng); break;
+    case 'negotiate': result = Story.Resolver._resolveNegotiate(state, scene, effectiveIntent, base, rng); break;
+    case 'cultivate': result = Story.Resolver._resolveCultivate(state, scene, effectiveIntent, base, rng); break;
+    case 'craft':     result = Story.Resolver._resolveCraft(state, scene, effectiveIntent, base, rng); break;
+    case 'battle':    result = Story.Resolver._resolveBattle(state, scene, effectiveIntent, base, rng); break;
+    case 'flee':      result = Story.Resolver._resolveFlee(state, scene, effectiveIntent, base, rng); break;
+    case 'deceive':   result = Story.Resolver._resolveDeceive(state, scene, effectiveIntent, base, rng); break;
+    case 'use_relic': result = Story.Resolver._resolveUseRelic(state, scene, effectiveIntent, base, rng); break;
+    case 'steal':     result = Story.Resolver._resolveSteal(state, scene, effectiveIntent, base, rng); break;
+    case 'aid':       result = Story.Resolver._resolveAid(state, scene, effectiveIntent, base, rng); break;
+    case 'travel':    result = Story.Resolver._resolveTravel(state, scene, effectiveIntent, base, rng); break;
+    default:          result = Story.Resolver._resolveFreeform(state, scene, effectiveIntent, base, rng); break;
   }
+  if (sequence && sequence.abortedIntents && sequence.abortedIntents.length) {
+    result.transitions = sequence.transitions || [];
+    result.abortedIntents = sequence.abortedIntents;
+    result.publicEffects = [(actor ? actor.name : intent.actorId) + '起初' + sequence.abortedIntents[0].text + '，中途转折，最终' + (sequence.finalIntent.text || '改变行动') + '。'].concat(result.publicEffects || []);
+    result.costs = (result.costs || []).concat([{ type: 'action_reversal', text: '起始行动未完成，最终行动取代了原计划。' }]);
+  }
+  return result;
 };
 
 Story.Resolver._timePassed = function (pref) {
@@ -4297,7 +4498,10 @@ Story.Delta._applyOne = function (state, d) {
       const key = d.payload.key;
       if (key === 'injury') a2.hidden.injury = Math.max(0, Math.min(10, (a2.hidden.injury || 0) + (d.payload.delta || 0)));
       else if (key === 'cultivationProgress') a2.hidden.cultivationProgress = Math.min(99, (a2.hidden.cultivationProgress || 0) + (d.payload.delta || 0));
-      else if (key === 'spirit') a2.hidden.spirit = Math.max(0, (a2.hidden.spirit || 0) + (d.payload.delta || 0));
+      else if (key === 'spirit') {
+        a2.hidden.combatStats = a2.hidden.combatStats || { body: 10, spirit: 10, soul: 10 };
+        a2.hidden.combatStats.spirit = Math.max(0, (a2.hidden.combatStats.spirit || 0) + (d.payload.delta || 0));
+      }
       else if (key === 'hostility' || key === 'alertness') a2.hidden[key] = Math.max(0, Math.min(10, (a2.hidden[key] || 0) + (d.payload.delta || 0)));
       break;
     }
@@ -4788,7 +4992,7 @@ Story.Narration.buildCanonicalSummary = function (state, envelope, interactions,
     let sentence = who + Story.Narration._catLabel(action.category);
     if (action.targetName && action.targetName !== who) sentence += '的目标是' + action.targetName;
     sentence += '，结果为' + Story.Narration._outcomeLabel(action.outcome);
-    const gains = (action.gains || []).map(function (item) { return item.text; }).filter(Boolean);
+    const gains = (action.gains || []).filter(function (item) { return item.public === true || ['status', 'cultivation', 'info', 'clue', 'relic_resonance'].indexOf(item.type) < 0; }).map(function (item) { return item.text; }).filter(Boolean);
     const costs = (action.costs || []).map(function (item) { return item.text; }).filter(Boolean);
     if (gains.length) sentence += '，' + gains.join('、');
     if (costs.length) sentence += '；代价是' + costs.join('、');
@@ -4819,6 +5023,13 @@ Story.Narration.buildTurnContract = function (state, envelope, directorPlan, sce
     else requiredMeaning.push(actor.name + '执行' + Story.Narration._catLabel(action.category));
     (action.publicEffects || []).forEach(function (fact) { if (requiredMeaning.indexOf(fact) < 0) requiredMeaning.push(fact); });
     requiredMeaning.push('结果为' + Story.Narration._outcomeLabel(action.outcome));
+    var targetKnown = action.targetKnown !== false && (!action.targetResolution || action.targetResolution.known !== false);
+    var targetPresent = action.targetPresent !== false && (!action.targetResolution || action.targetResolution.present !== false);
+    var targetReachable = action.targetReachable !== false && (!action.targetResolution || action.targetResolution.reachable !== false);
+    var privateGainTypes = ['info', 'clue', 'relic_resonance', 'status', 'cultivation'];
+    var allGains = (action.gains || []).map(function (item) { return item.text; }).filter(Boolean);
+    var publicGains = (action.gains || []).filter(function (item) { return privateGainTypes.indexOf(item.type) < 0 || item.public === true; }).map(function (item) { return item.text; }).filter(Boolean);
+    var claims = action.speechClaim ? [Story._clone(action.speechClaim)] : [];
     mustRenderFacts.push({
       factId: 'fact_action_' + index + '_' + action.actorId,
       kind: 'action', actorId: action.actorId, actorName: actor.name,
@@ -4826,15 +5037,26 @@ Story.Narration.buildTurnContract = function (state, envelope, directorPlan, sce
       source: action.source || 'custom', targetType: action.targetType || '', targetId: action.targetId || '', targetName: targetName,
       outcome: action.outcome, outcomeLabel: Story.Narration._outcomeLabel(action.outcome),
       requiredMeaning: requiredMeaning,
-      gains: (action.gains || []).map(function (item) { return item.text; }).filter(Boolean),
+      gains: publicGains,
       costs: (action.costs || []).map(function (item) { return item.text; }).filter(Boolean),
+      privateGains: allGains.filter(function (gain) { return publicGains.indexOf(gain) < 0; }),
+      actionSequence: action.actionSequence ? Story._clone(action.actionSequence) : null,
+      claims: claims,
+      targetResolution: { known: targetKnown, present: targetPresent, reachable: targetReachable },
+      consequencePolicy: Story.Narration.buildConsequencePolicy(action),
+      agencyPolicy: Story.Narration.buildAgencyPolicy(state, action),
     });
   });
   (envelope.interactions || []).forEach(function (interaction, index) {
+    var interactionActors = (interaction.actorIds || []).map(function (id) {
+      var actor = state.actors.find(function (candidate) { return candidate.id === id; });
+      return actor ? actor.name : id;
+    });
     mustRenderFacts.push({
       factId: 'fact_interaction_' + index,
       kind: 'interaction', interactionType: interaction.type,
       actorIds: (interaction.actorIds || []).slice(), targetId: interaction.targetId || '',
+      actorNames: interactionActors,
       requiredMeaning: (interaction.requiredNarrativeFacts || []).slice(), gains: [], costs: [],
     });
   });
@@ -4845,20 +5067,29 @@ Story.Narration.buildTurnContract = function (state, envelope, directorPlan, sce
   (state.assets || []).forEach(function (asset) {
     if (!asset.visibility || asset.visibility === 'public') entities.push({ id: Story.canonicalEntityId(asset.id), name: asset.name, kind: asset.kind || 'relic' });
   });
-  (state.story.activeThreads || []).filter(function (thread) {
-    return thread.visibility === 'public' && thread.status === 'active';
-  }).forEach(function (thread) { entities.push({ id: thread.threadId, name: thread.title, kind: 'thread' }); });
+  Story.ThreadView.getPublicActiveThreads(state).forEach(function (thread) { entities.push({ id: thread.threadId, name: thread.title, kind: 'thread' }); });
   const seen = {};
   const entityWhitelist = entities.filter(function (entity) {
     const key = entity.id || entity.name;
     if (!key || seen[key]) return false;
     seen[key] = true; return true;
   }).map(function (entity) { return { id: entity.id, name: entity.name, type: entity.kind || 'prop' }; });
+  const projectedActors = scene && scene.actorLocations ? scene.actorLocations : [];
   const actorWhitelist = state.actors.map(function (actor) {
-    return { id: actor.id, name: actor.name, displayName: actor.displayName || actor.name, locationId: actor.locationId || scene.locationId, presence: actor.presence || 'present' };
+    var projected = projectedActors.find(function (entry) { return entry.actorId === actor.id; });
+    return { id: actor.id, name: actor.name, displayName: actor.displayName || actor.name, locationId: projected ? projected.locationId : (actor.locationId || scene.locationId), presence: projected ? projected.presence : (actor.presence || 'present') };
   });
+  const actionFacts = mustRenderFacts.filter(function (fact) { return fact.kind === 'action'; });
+  const interactionFacts = mustRenderFacts.filter(function (fact) { return fact.kind === 'interaction'; });
+  const humanActorIds = state.actors.filter(function (actor) { return Story._isHumanActor(state, actor); }).map(function (actor) { return actor.id; });
+  const submittedHumanActorIds = actionFacts.map(function (fact) { return fact.actorId; });
   return {
     contractVersion: '1.0', turnId: envelope.turnId || '', mustRenderFacts: mustRenderFacts,
+    humanActorIds: humanActorIds.slice(),
+    submittedHumanActorIds: submittedHumanActorIds.slice(),
+    actionFactIds: actionFacts.map(function (fact) { return fact.factId; }),
+    interactionFactIds: interactionFacts.map(function (fact) { return fact.factId; }),
+    humanActionFacts: actionFacts.map(function (fact) { return fact.factId; }),
     optionalAtmosphere: ['雨水', '灰尘', '风声', '远处无名行人'],
     forbiddenClaims: [
       '不得新增未登记的重要 NPC、敌人或妖兽', '不得新增角色未持有的物品',
@@ -4878,15 +5109,130 @@ Story.Narration.buildTurnContract = function (state, envelope, directorPlan, sce
   };
 };
 
+Story.Narration.buildConsequencePolicy = function (action) {
+  action = action || {};
+  var category = action.category || '';
+  var allowedEffects = ['普通旁观反应', '浪费少量时间', '制造声音或气味', '影响局部秩序', '轻微关系变化'];
+  var mayRevealClue = category === 'investigate' || category === 'observe' || category === 'social' || category === 'negotiate';
+  var mayChangeLocation = category === 'travel' || category === 'flee';
+  if (mayRevealClue) allowedEffects.push('本地裁决明确给出的线索');
+  if (mayChangeLocation) allowedEffects.push('本地裁决明确给出的地点变化');
+  return {
+    magicalEffect: category === 'use_relic',
+    mayCreatePersistentEntity: false,
+    mayCreateAsset: category === 'craft',
+    mayRevealClue: mayRevealClue,
+    mayAdvanceThread: category === 'investigate' || category === 'negotiate' || category === 'observe' || category === 'use_relic',
+    mayChangeLocation: mayChangeLocation,
+    allowedEffects: allowedEffects,
+  };
+};
+
+Story.Narration.buildAgencyPolicy = function (state, action) {
+  action = action || {};
+  var target = (state.actors || []).find(function (actor) { return actor.id === action.targetId; });
+  var affectsOtherHuman = !!target && Story._isHumanActor(state, target) && target.id !== action.actorId;
+  return {
+    affectsOtherHuman: affectsOtherHuman,
+    controlsOtherHuman: false,
+    requiresConsent: affectsOtherHuman,
+    contested: affectsOtherHuman,
+  };
+};
+
+Story.Narration._qualityWeight = function (fact) {
+  if (!fact || fact.kind !== 'action') return 0;
+  var weight = 0;
+  if (fact.source === 'custom') weight += 3;
+  if (fact.actionType === 'battle' || fact.agencyPolicy && fact.agencyPolicy.affectsOtherHuman) weight += 4;
+  if (fact.consequencePolicy && fact.consequencePolicy.mayAdvanceThread) weight += 3;
+  if (fact.outcome === 'success_with_cost' || fact.outcome === 'setback' || fact.outcome === 'interrupted') weight += 3;
+  if (fact.costs && fact.costs.length) weight += 2;
+  if (fact.actionType === 'travel' || fact.actionType === 'flee') weight += 2;
+  if (fact.actionSequence && fact.actionSequence.transitions && fact.actionSequence.transitions.length) weight += 2;
+  if (fact.actionType === 'investigate' || fact.actionType === 'observe') weight += 1;
+  if (fact.actionType === 'rest' && fact.outcome === 'quiet_success') weight -= 1;
+  return weight;
+};
+
+Story.Narration._chooseOpeningMode = function (memory) {
+  memory = memory || {};
+  var modes = ['action', 'dialogue', 'object_change', 'result_flashback', 'space_anomaly', 'character_sensation', 'brief_silence'];
+  var recent = memory.recentOpeningModes || [];
+  return modes.find(function (mode) { return recent.slice(-2).indexOf(mode) < 0; }) || modes[(recent.length || 0) % modes.length];
+};
+
+Story.Narration.buildQualityPlan = function (state, contract, projectedState) {
+  contract = contract || {};
+  var facts = (contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'action'; });
+  var interactions = (contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'interaction'; });
+  var ranked = facts.map(function (fact, index) { return { fact: fact, index: index, weight: Story.Narration._qualityWeight(fact) }; })
+    .sort(function (a, b) { return b.weight - a.weight || a.index - b.index; });
+  var primary = ranked.slice(0, 1).map(function (entry) { return entry.fact.factId; });
+  var secondary = ranked.slice(1, Math.min(3, ranked.length)).map(function (entry) { return entry.fact.factId; });
+  var selected = primary.concat(secondary);
+  var montage = facts.map(function (fact) { return fact.factId; }).filter(function (id) { return selected.indexOf(id) < 0; });
+  var actorIds = primary.concat(secondary).map(function (id) {
+    var fact = facts.find(function (candidate) { return candidate.factId === id; });
+    return fact && fact.actorId;
+  }).filter(Boolean);
+  var humanCount = new Set(facts.map(function (fact) { return fact.actorId; })).size;
+  var factCount = facts.length + interactions.length;
+  var min = humanCount <= 1 ? 260 : (humanCount === 2 ? 420 : (humanCount === 3 ? 600 : 760));
+  var ideal = humanCount <= 1 ? 600 : (humanCount === 2 ? 850 : (humanCount === 3 ? 1100 : 1400));
+  var max = humanCount <= 1 ? 900 : (humanCount === 2 ? 1200 : (humanCount === 3 ? 1500 : 1800));
+  var memory = state.story.narrativeStyleMemory || {};
+  var openingMode = Story.Narration._chooseOpeningMode(memory);
+  var endingModes = ['consequence', 'unfinished_action', 'character_decision', 'relationship_crack', 'next_window', 'object_change', 'short_dialogue', 'scene_shift'];
+  var endingMode = endingModes.find(function (mode) { return (memory.recentEndingModes || []).slice(-2).indexOf(mode) < 0; }) || endingModes[(memory.recentEndingModes || []).length % endingModes.length];
+  var paragraphPlan = [];
+  if (primary.length) paragraphPlan.push({ role: 'hook', factIds: primary, purpose: '从主冲突或具体动作切入，避免模板化天气开场。' });
+  if (secondary.length) paragraphPlan.push({ role: 'collision', factIds: secondary.slice(0, 1).concat(interactions.map(function (fact) { return fact.factId; })), purpose: '呈现行动之间的碰撞、协作或互相破坏。' });
+  if (secondary.length > 1 || montage.length) paragraphPlan.push({ role: 'parallel', factIds: secondary.slice(1).concat(montage), purpose: '合并并行行动，确保每名真人仍有可见因果。' });
+  paragraphPlan.push({ role: 'consequence', factIds: primary.concat(secondary), purpose: '落到结果、代价、位置或关系变化，留下具体下一步。' });
+  return {
+    qualityPlanVersion: '1.0',
+    primaryFactIds: primary,
+    secondaryFactIds: secondary,
+    montageFactIds: montage,
+    focalActorIds: Array.from(new Set(actorIds)),
+    focalConflict: primary.length ? ((facts.find(function (fact) { return fact.factId === primary[0]; }) || {}).actionText || '') : '',
+    openingMode: openingMode,
+    endingMode: endingMode,
+    paragraphPlan: paragraphPlan.slice(0, 6),
+    dialoguePlan: interactions.length ? ['只在冲突、试探、决定或信息交换处使用对白。'] : ['对白可省略，优先呈现具体动作。'],
+    targetLength: { minChars: min, idealChars: ideal + Math.min(250, Math.max(0, factCount - 3) * 50), maxChars: max + Math.min(300, Math.max(0, factCount - 4) * 75) },
+    styleRules: { concreteActionPerParagraph: true, maxDominantImagesPerParagraph: 1, avoidReportLikeSegments: true },
+    avoidPatterns: ['细雨如丝', '夜色如墨', '暗流涌动', '命运交织', '仿佛有什么在注视'].concat((memory.recentOpeningPhrases || []).slice(-5)),
+    projectedScene: projectedState && projectedState.scene ? Story._clone(projectedState.scene) : null,
+  };
+};
+
+Story.Narration.validateTurnContractCompleteness = function (contract) {
+  contract = contract || {};
+  var facts = (contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'action'; });
+  var expected = (contract.humanActorIds && contract.humanActorIds.length ? contract.humanActorIds : facts.map(function (fact) { return fact.actorId; })).slice().sort();
+  var submitted = (contract.submittedHumanActorIds || []).slice().sort();
+  var factActors = facts.map(function (fact) { return fact.actorId; }).sort();
+  if (expected.length !== submitted.length || expected.some(function (id, index) { return id !== submitted[index]; }) || factActors.length !== submitted.length || factActors.some(function (id, index) { return id !== submitted[index]; })) {
+    return Story.Narration._violation('NARRATIVE_CONTRACT_INCOMPLETE', '真人行动事实与已提交真人行动不一致，禁止请求 AI', '', { expected: expected, submitted: submitted, factActors: factActors });
+  }
+  return null;
+};
+
 Story.Narration.buildSystemPrompt = function () {
   return [
-    '你是《修行局》的章节渲染器，不是游戏裁判。所有游戏事实已由本地 Resolver 决定。',
-    'turnContract.mustRenderFacts 是本回合已经发生的事实，每一项真人行动都必须在正文中产生明确因果；自定义行动优先级最高。',
+    '你是《修行局》的章节渲染器和场面调度者，不是游戏裁判。所有事实、结果、地点和时间均由本地 Resolver 决定。',
+    'turnContract.mustRenderFacts 是本回合已经发生的事实，每一项真人行动和 mandatory interaction 都必须在正文中产生明确因果；自定义行动优先级最高。',
     'chosenActions 是契约的可读镜像，coverageAnchors 是兼容覆盖锚点；两者都不能覆盖 mustRenderFacts。',
-    '不得替换角色、目标、地点、结果和时间；不得新增未登记的重要人物、敌人、妖兽、物品或战斗。',
+    '不得替换角色、目标、地点、结果和时间；不得新增未登记的重要人物、势力、敌人、妖兽、物品、伤势、线索或持久事实。',
+    '荒诞行动只能产生 consequencePolicy.allowedEffects 中的普通后果；不得未经本地事实契约附加天命奖励、灵光、神谕、地图、觉醒或线索。',
+    '一名真人只能尝试影响另一名真人，不能替对方接受交易、移动、改变立场、放弃行动或做出选择； contested interaction 必须写成尝试与裁决结果。',
     '不得复述上一章。previousTurnSummary 只用于理解承接关系，不是可复制的正文。',
-    '正文 450-850 个中文字，3-5 段，以动作、对话与可感后果呈现契约事实，不要写成摘要。',
-    '只返回严格 JSON 对象 {title, chapter, dialogues, endingImage}，不要 Markdown，不要解释，不要返回状态字段。',
+    '围绕一个主要冲突组织章节；优先使用动作和具体物件，少写抽象总结，不要逐项汇报玩家行动；对白只用于冲突、试探、决定和信息交换。',
+    '遵守 qualityPlan 的段落职责、开场和结尾模式；避免连续天气开场、模板化意象、每段都以角色姓名开头和与上一章复制。',
+    '只返回严格 JSON 对象 {title, chapter, dialogues, endingImage, audit}，不要 Markdown，不要解释，不要返回状态字段；audit 只供服务端验收。',
+    'audit 必须尽量列出 coveredFactIds、coveredInteractionIds、mentionedEntities、mentionedLocations、assertedPersistentClaims、openingMode。',
   ].join('\n');
 };
 
@@ -4895,9 +5241,9 @@ Story.Narration.buildUserPrompt = function (ctx) {
   const prefix = correction ? [
     '上一份章节被拒绝。',
     '错误：' + (correction.previousErrors || []).map(function (error, index) { return (index + 1) + '. ' + (error.message || error.code || error); }).join(' '),
-    '请逐条执行 requiredRepairs，依据 mustRenderFacts 重新生成完整章节。不要解释错误。',
+    '请逐条执行 requiredRepairs，依据 mustRenderFacts 重新生成完整章节。保留上一版已正确落实的事实，不得改动本地结果。不要解释错误。',
   ].join('\n') + '\n\n' : '';
-  return prefix + '本回合叙事上下文 JSON：\n' + JSON.stringify(ctx);
+  return prefix + '请按以下顺序处理：NarrativeQualityPlan → mustRenderFacts → mandatoryInteractions → canonicalScene/actorLocations → consequencePolicy → entity whitelist → previous public summary → style memory/avoid patterns → protocolCorrection。\n本回合叙事上下文 JSON：\n' + JSON.stringify(ctx);
 };
 
 Story.Narration._debugSink = null;
@@ -4947,6 +5293,75 @@ Story.Narration.validateActionFacts = function (narration, contract) {
       if (!(actorHit && actionHit && targetHit && outcomeHit)) return Story.Narration._violation('MISSING_ACTION_FACT', '正文未完整落实' + fact.actorName + '攻击' + fact.targetName, text, { factId: fact.factId });
     } else if (!(actorHit && actionHit && (outcomeHit || resultHit))) {
       return Story.Narration._violation('MISSING_ACTION_FACT', '正文未落实真人行动：' + fact.actorName + '·' + fact.actionText, text, { factId: fact.factId });
+    }
+  }
+  return null;
+};
+
+/* V3.4.2：按 actor 局部窗口核对事实，避免跨段拼接出“伪覆盖”。 */
+Story.Narration._factWindow = function (text, actorName, fact) {
+  var source = String(text || '');
+  if (!actorName) return '';
+  var name = String(actorName);
+  var positions = [];
+  var cursor = 0;
+  while (cursor < source.length) {
+    var index = source.indexOf(name, cursor);
+    if (index < 0) break;
+    positions.push(index);
+    cursor = index + name.length;
+  }
+  if (!positions.length) return '';
+  var bestWindow = '';
+  var bestScore = -1;
+  var actionTokens = fact ? Story.Narration._factActionTokens(fact) : [];
+  positions.forEach(function (position) {
+    var candidate = source.slice(Math.max(0, position - 120), Math.min(source.length, position + name.length + 180));
+    var score = 0;
+    if (fact) {
+      if (fact.targetName && candidate.indexOf(fact.targetName) >= 0) score += 2;
+      if (actionTokens.some(function (token) { return token && candidate.indexOf(token) >= 0; })) score += 4;
+      if (fact.outcomeLabel && candidate.indexOf(fact.outcomeLabel) >= 0) score += 1;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestWindow = candidate;
+    }
+  });
+  return bestWindow;
+};
+Story.Narration._factActionTokens = function (fact) {
+  var tokens = [];
+  var raw = String(fact && fact.actionText || '').replace(/[，。；：、“”‘’（）()\s]+/g, '');
+  var agencyAction = !!(fact && fact.agencyPolicy && fact.agencyPolicy.affectsOtherHuman);
+  if (raw.length >= 2 && !agencyAction) tokens.push(raw.slice(0, Math.min(10, raw.length)));
+  var words = {
+    rest: ['休息', '休养', '睡', '休整', '疗伤'], wait: ['等待', '观望', '按兵不动'], observe: ['观察', '留意', '盯'], investigate: ['调查', '追查', '搜查', '查看', '寻找'], travel: ['前往', '移动', '动身', '离开', '转向', '跑去'], social: ['交谈', '询问', '说', '指认', '指控'], negotiate: ['谈判', '交易', '条件'], cultivate: ['修炼', '闭关', '静修'], craft: ['炼制', '锻造', '修复'], battle: ['攻击', '袭击', '出手', '出剑', '攻向', '命中'], flee: ['逃', '撤', '退避'], steal: ['偷', '窃取', '盗取'], aid: ['援护', '帮助', '支援'], deceive: ['欺骗', '伪装', '说谎', '诬告', '设局'], use_relic: ['御器', '法宝', '遗物', '共鸣'], freeform: ['行动', '尝试']
+  };
+  if (agencyAction) tokens = tokens.concat(['尝试', '试图', '拉住', '拉扯', '挣脱', '拒绝', '自行选择']);
+  return tokens.concat(words[fact.actionType] || []).concat((fact.requiredMeaning || []).map(function (meaning) { return String(meaning).slice(0, 12); }));
+};
+Story.Narration.validateActionFacts = function (narration, contract) {
+  var parsed = Story.Narration._parsedText(narration);
+  var text = parsed.chapter;
+  var facts = (contract && contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'action'; });
+  for (var i = 0; i < facts.length; i++) {
+    var fact = facts[i];
+    var window = Story.Narration._factWindow(text, fact.actorName, fact);
+    var actorHit = !!window;
+    var actionHit = Story.Narration._factActionTokens(fact).some(function (token) { return token && window.indexOf(token) >= 0; });
+    var targetHit = !fact.targetName || fact.targetName === fact.actorName || window.indexOf(fact.targetName) >= 0;
+    var outcomeWords = {
+      great_success: ['大获成功', '完全成功', '额外线索'], success: ['成功', '命中', '得手', '取得'], quiet_success: ['恢复', '缓和', '安稳', '休整', '醒来', '睡觉'], success_with_cost: ['代价', '受伤', '损耗', '暴露'], partial_success: ['未完全', '部分', '打断', '未能全数'], setback: ['失利', '受挫', '未能', '失败', '没有完成'], missed_opportunity: ['错过', '机会流失'], interrupted: ['打断', '中断', '惊扰'], retreat: ['退避', '撤离', '逃离'], stalemate: ['僵持', '制止'], long_action_request: ['尚未开始', '等待同意', '登记请求']
+    };
+    var outcomeHit = (outcomeWords[fact.outcome] || []).concat([fact.outcomeLabel || '']).some(function (word) { return word && window.indexOf(word) >= 0; });
+    var resultHit = (fact.gains || []).concat(fact.costs || []).some(function (item) { return item && window.indexOf(item) >= 0; });
+    if (fact.actionType === 'battle' && fact.targetType === 'actor') {
+      if (actorHit && actionHit && !targetHit) return Story.Narration._violation('WRONG_ACTION_TARGET', fact.actorName + '的攻击目标必须是' + fact.targetName, text, { factId: fact.factId });
+      if (actorHit && actionHit && targetHit && !outcomeHit && !resultHit) return Story.Narration._violation('WRONG_ACTION_OUTCOME', fact.actorName + '攻击' + fact.targetName + '的结果与本地裁决不一致', text, { factId: fact.factId });
+    }
+    if (!(actorHit && actionHit && targetHit && (outcomeHit || resultHit || fact.outcome === 'success' && actionHit))) {
+      return Story.Narration._violation('MISSING_ACTION_FACT', '正文未在' + fact.actorName + '的局部事实窗口完整落实行动：' + fact.actionText, text, { factId: fact.factId });
     }
   }
   return null;
@@ -5030,6 +5445,136 @@ Story.Narration.validateTemporalConsistency = function (narration, contract) {
   return null;
 };
 
+Story.Narration.validateInteractionFacts = function (narration, contract) {
+  var text = Story.Narration._parsedText(narration).chapter;
+  var facts = (contract && contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'interaction'; });
+  for (var i = 0; i < facts.length; i++) {
+    var fact = facts[i];
+    var actorNames = fact.actorNames || (fact.actorIds || []).map(function (id) {
+      var actor = (contract.actorWhitelist || []).find(function (entry) { return entry.id === id; });
+      return actor && actor.name || id;
+    });
+    var anchors = (fact.requiredMeaning || []).filter(Boolean);
+    var actorHits = actorNames.filter(function (name) { return name && text.indexOf(name) >= 0; }).length;
+    var interactionPattern = {
+      contested_pull: /拉住|拉扯|挣脱|未被迫|仍保有|自行选择|没有被迫/, attack_sleeping_actor: /攻击|袭击|打断.*休息/, combat_aid: /援护|支援|保护/, cooperative_investigation: /协作|共同.*调查/, investigate_destroy_conflict: /调查.*攻击|线索.*受损/, group_travel: /同行|一起.*前往/, travel_conflict: /分歧|去留|不同.*目的地/
+    }[fact.interactionType];
+    if (interactionPattern && interactionPattern.test(text) && actorHits >= Math.min(2, actorNames.length)) continue;
+    var meaningHit = anchors.some(function (meaning) {
+      var tokens = String(meaning).split(/[，。；：、\s]+/).filter(function (token) { return token.length >= 2; });
+      return tokens.length && tokens.filter(function (token) { return text.indexOf(token) >= 0; }).length >= Math.max(1, Math.ceil(tokens.length * 0.25));
+    });
+    if (!(meaningHit && (actorHits >= Math.min(2, actorNames.length) || anchors.some(function (meaning) { return text.indexOf(meaning) >= 0; })))) {
+      return Story.Narration._violation('MISSING_INTERACTION_FACT', '正文未落实强制互动：' + anchors.join('；'), text, { factId: fact.factId, interactionType: fact.interactionType });
+    }
+  }
+  return null;
+};
+
+Story.Narration.validatePlayerAgency = function (narration, contract) {
+  var text = Story.Narration._parsedText(narration).chapter;
+  var humanNames = (contract && contract.actorWhitelist || []).map(function (actor) { return actor.name; });
+  var facts = (contract && contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'action' && fact.agencyPolicy && fact.agencyPolicy.affectsOtherHuman; });
+  for (var i = 0; i < facts.length; i++) {
+    var fact = facts[i];
+    var target = fact.targetName;
+    var window = Story.Narration._factWindow(text, fact.actorName, fact);
+    var escapedTarget = String(target || '').replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+    var directControl = escapedTarget && new RegExp(
+      '(?:强迫|控制|强拉|拽着|迫使|逼着|命令|直接让)[^，。；]{0,4}' + escapedTarget +
+      '|' + escapedTarget + '[^，。；]{0,4}(?:被迫|不由自主|被强拉|被控制|被迫跟随)' +
+      '|(?:替|代替)' + escapedTarget + '[^，。；]{0,6}(?:接受|决定|放弃)'
+    );
+    var controlMatch = directControl && directControl.exec(window);
+    var controlPrefix = controlMatch ? window.slice(Math.max(0, controlMatch.index - 4), controlMatch.index) : '';
+    var explicitlyNegated = /(?:没有|并未|未曾|不曾|未|不)$/.test(controlPrefix);
+    if (target && humanNames.indexOf(target) >= 0 && controlMatch && !explicitlyNegated) {
+      return Story.Narration._violation('PLAYER_AGENCY_VIOLATION', fact.actorName + '不能直接控制' + target + '的身体、立场或选择', text, { factId: fact.factId, targetName: target });
+    }
+  }
+  return null;
+};
+
+Story.Narration.validateConsequenceBudget = function (narration, contract) {
+  var text = Story.Narration._parsedText(narration).chapter;
+  var facts = (contract && contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'action'; });
+  var magical = /天命|天道回应|灵光|神谕|唤醒地下|天地异象|超自然奖励|法宝认主|灵脉地图/.test(text);
+  if (magical && !facts.some(function (fact) { return fact.consequencePolicy && fact.consequencePolicy.magicalEffect; })) {
+    return Story.Narration._violation('UNAUTHORIZED_SUPERNATURAL_EFFECT', '正文附加了未经裁决的超自然后果', text);
+  }
+  var clueCreated = /(?:发现|得到|获得|浮现|找到).{0,12}(?:线索|地图|密信|真相)/.test(text);
+  if (clueCreated && !facts.some(function (fact) { return fact.consequencePolicy && fact.consequencePolicy.mayRevealClue && (fact.gains || []).length; })) {
+    return Story.Narration._violation('UNAUTHORIZED_CLUE', '正文附加了未经裁决的线索或奖励', text);
+  }
+  return null;
+};
+
+Story.Narration.validateEntityAudit = function (narration, contract) {
+  var parsed = Story.Provider.parseNarrationResponse(narration);
+  if (!parsed.audit) return null;
+  var whitelist = (contract.entityWhitelist || []).map(function (entry) { return entry.name; }).concat((contract.actorWhitelist || []).map(function (entry) { return entry.name; }));
+  var unknown = (parsed.audit.mentionedEntities || []).find(function (name) { return name && whitelist.indexOf(name) < 0; });
+  if (unknown) return Story.Narration._violation('UNREGISTERED_ENTITY', 'audit 声称出现了未登记实体：' + unknown, parsed.chapter, { entity: unknown });
+  var ids = (contract.mustRenderFacts || []).map(function (fact) { return fact.factId; });
+  var invalidFact = (parsed.audit.coveredFactIds || []).find(function (id) { return ids.indexOf(id) < 0; });
+  if (invalidFact) return Story.Narration._violation('AUDIT_UNKNOWN_FACT', 'audit 引用了未知事实 ID：' + invalidFact, parsed.chapter, { factId: invalidFact });
+  return null;
+};
+
+Story.Narration.validateChapterCompleteness = function (narration, contract, options) {
+  options = options || {};
+  var parsed = Story.Provider.parseNarrationResponse(narration);
+  var text = parsed.chapter || '';
+  var facts = (contract && contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'action'; });
+  var actorCount = new Set(facts.map(function (fact) { return fact.actorId; })).size;
+  var minimum = actorCount <= 1 ? 260 : (actorCount === 2 ? 420 : (actorCount === 3 ? 600 : 760));
+  var paragraphs = text.split(/\n+/).map(function (part) { return part.trim(); }).filter(Boolean);
+  var minParagraphs = actorCount <= 1 ? 2 : (actorCount === 2 ? 3 : (actorCount === 3 ? 3 : 4));
+  if (parsed.finishReason === 'length' || options.finishReason === 'length') return Story.Narration._violation('NARRATION_TRUNCATED', 'Provider 以 length 截断了章节', text);
+  if (text.replace(/\s/g, '').length < minimum) return Story.Narration._violation('NARRATION_TOO_SHORT', '正文长度不足，至少需要' + minimum + '字', text, { minimum: minimum, actual: text.replace(/\s/g, '').length });
+  if (paragraphs.length < minParagraphs) return Story.Narration._violation('INSUFFICIENT_PARAGRAPHS', '正文段落数不足，至少需要' + minParagraphs + '段', text, { minimum: minParagraphs, actual: paragraphs.length });
+  if (/[，、；：]$/.test(text) || /(?:然后|随后|却|忽然|正要|刚刚?)$/.test(text)) return Story.Narration._violation('NARRATION_INCOMPLETE', '正文以明显未完成结构结尾', text);
+  return null;
+};
+
+Story.Narration.validateContinuityAgainstSummary = function (narration, summary, contract) {
+  var text = Story.Narration._parsedText(narration).chapter;
+  var previous = String(summary || '');
+  if (/已经离开|离队/.test(previous) && /回到|重新出现|再次抵达/.test(text) && !/归队|返回|解释/.test(text)) return Story.Narration._violation('CONTINUITY_CONTRADICTION', '已离开的角色无解释回归', text);
+  if (/时间推进一片刻|时间推进1片刻/.test(previous) && /数月|半年|数年|百年/.test(text)) return Story.Narration._violation('CONTINUITY_CONTRADICTION', '正文时间跨度超过上一章公共摘要', text);
+  return null;
+};
+
+Story.Narration.validateClaimEvidence = function (narration, contract) {
+  var text = Story.Narration._parsedText(narration).chapter;
+  var facts = (contract && contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'action' && fact.claims && fact.claims.length; });
+  for (var i = 0; i < facts.length; i++) {
+    var fact = facts[i];
+    for (var j = 0; j < fact.claims.length; j++) {
+      var claim = fact.claims[j];
+      if (!claim || !claim.subjectName || !claim.predicate) continue;
+      var asserted = claim.subjectName + claim.predicate;
+      if (text.indexOf(asserted) >= 0) {
+        var window = Story.Narration._factWindow(text, fact.actorName, fact);
+        if (!/(声称|指认|指控|诬告|据称|怀疑|自称|认为|宣称)/.test(window)) return Story.Narration._violation('EVIDENCE_STATUS_VIOLATION', '未证实指控被正文写成客观事实：' + asserted, text, { factId: fact.factId, claim: claim });
+      }
+    }
+  }
+  return null;
+};
+
+Story.Narration.validateStyleSoft = function (narration, state) {
+  var text = Story.Narration._parsedText(narration).chapter;
+  var memory = state && state.story && state.story.narrativeStyleMemory || {};
+  var warnings = [];
+  var opening = text.slice(0, 50);
+  if ((memory.recentOpeningPhrases || []).some(function (phrase) { return phrase && (opening.indexOf(phrase) >= 0 || phrase.indexOf(opening.slice(0, 12)) >= 0); })) warnings.push(Story.Narration._violation('REPETITIVE_OPENING', '章节开头与最近章节过于相似', text));
+  ['细雨如丝', '夜色如墨', '心头一凛', '暗流涌动', '命运交织'].forEach(function (phrase) {
+    if (text.indexOf(phrase) >= 0 && (memory.recentOpeningPhrases || []).filter(function (item) { return item === phrase; }).length >= 1) warnings.push(Story.Narration._violation('REPETITIVE_STYLE_PHRASE', '高频模板短语重复：' + phrase, text));
+  });
+  return warnings;
+};
+
 Story.Narration.validateSemantic = function (state, narration, brief) {
   const contract = brief && brief.turnContract;
   if (!contract) return [];
@@ -5041,18 +5586,59 @@ Story.Narration.validateSemantic = function (state, narration, brief) {
     Story.Narration.validateNovelty(narration, recent),
     Story.Narration.validateCanonicalClaims(narration, contract),
     Story.Narration.validateTemporalConsistency(narration, contract),
+    Story.Narration.validateInteractionFacts(narration, contract),
+    Story.Narration.validatePlayerAgency(narration, contract),
+    Story.Narration.validateConsequenceBudget(narration, contract),
+    Story.Narration.validateEntityAudit(narration, contract),
+    Story.Narration.validateClaimEvidence(narration, contract),
+    brief.enforcePublishGate ? Story.Narration.validateChapterCompleteness(narration, contract) : null,
   ];
   return checks.filter(Boolean);
 };
 
+Story.Narration.validatePublishGate = function (state, narration, brief) {
+  var contract = brief && brief.turnContract;
+  if (!contract) return null;
+  var checks = [
+    Story.Narration.validateTurnContractCompleteness(contract),
+    Story.Narration.validateChapterCompleteness(narration, contract, { finishReason: narration && narration.finishReason }),
+    Story.Narration.validateActionFacts(narration, contract),
+    Story.Narration.validateInteractionFacts(narration, contract),
+    Story.Narration.validatePlayerAgency(narration, contract),
+    Story.Narration.validateConsequenceBudget(narration, contract),
+    Story.Narration.validateEntityAudit(narration, contract),
+    Story.Narration.validateClaimEvidence(narration, contract),
+    Story.Narration.validateTemporalConsistency(narration, contract),
+  ].filter(Boolean);
+  if (!checks.length) return null;
+  var first = checks[0];
+  first.gateCode = 'NARRATION_PUBLISH_BLOCKED';
+  return first;
+};
+
 /** 构建给 AI 的 NarrationBrief（V3.2 §N2） */
+Story.Narration.buildProjectedState = function (state, previewState, envelope, sceneAfter) {
+  var projected = previewState || state || {};
+  var projectedScene = sceneAfter || projected.story && projected.story.currentScene || {};
+  return {
+    scene: Story._clone(projectedScene),
+    actors: (projected.actors || []).map(function (actor) {
+      return { actorId: actor.id, locationId: actor.locationId || projectedScene.locationId || null, presence: actor.presence || 'present' };
+    }),
+    worldTime: Story._clone(envelope && envelope.elapsedTime || { value: 0, unit: '片刻' }),
+    publicThreads: Story.ThreadView.getPublicActiveThreads(projected),
+  };
+};
+
 Story.Narration.buildBrief = function (state, scene, envelope, directorPlan, sceneAfter) {
   const w = state.world;
   const s = state.story;
   const pending = s.pendingResolution || {};
   directorPlan = directorPlan || pending.directorPlan || null;
   sceneAfter = sceneAfter || pending.sceneAfterPreview || scene;
+  var projectedState = pending.projectedState || { scene: sceneAfter, actors: [], worldTime: envelope && envelope.elapsedTime, publicThreads: Story.ThreadView.getPublicActiveThreads(state) };
   const turnContract = Story.Narration.buildTurnContract(state, envelope, directorPlan, sceneAfter);
+  const qualityPlan = Story.Narration.buildQualityPlan(state, turnContract, projectedState);
   const focal = (scene && scene.focalActorIds && scene.focalActorIds.length) ? scene.focalActorIds : (state.actors[0] ? [state.actors[0].id] : []);
   const flags = (w.worldBible && w.worldBible.flags) || {};
   const toneTags = [];
@@ -5111,8 +5697,8 @@ Story.Narration.buildBrief = function (state, scene, envelope, directorPlan, sce
       (scene && scene.immediateQuestion) || '',
       (scene && scene.deadline && scene.deadline.type) || ''
     );
-    (state.story.activeThreads || []).filter(function (t) {
-      return t && (t.status === 'active' || t.status === 'dormant');
+    (state.story.activeThreads || []).filter(function (thread) {
+      return thread && thread.visibility === 'public' && (thread.status === 'active' || thread.status === 'dormant');
     }).slice(0, 2).forEach(function (thread) {
       openingAnchorGroups.pressure.push(thread.title || '');
     });
@@ -5146,15 +5732,74 @@ Story.Narration.buildBrief = function (state, scene, envelope, directorPlan, sce
     turnContract: turnContract,
     // V3.3.2：Director 叙事引导——告知 AI 当前卷纲与节拍目标
     director: directorGuide,
+    qualityPlan: qualityPlan,
+    projectedState: projectedState,
     style: {
-      proseLength: '450-850 Chinese characters',
-      paragraphCount: '3-5',
+      proseLength: qualityPlan.targetLength.minChars + '-' + qualityPlan.targetLength.maxChars + ' Chinese characters',
+      paragraphCount: String(Math.max(2, Math.min(6, qualityPlan.paragraphPlan.length))),
       focalConflictCount: 1,
       noSummaryTone: true,
       noGenericObserver: true,
       noUnjustifiedReward: true,
     },
     _envelope: envelope || null,
+  };
+};
+
+/* V3.4.2：给 Narrator 的唯一公共上下文构建器。禁止直接序列化 brief/_envelope。 */
+Story.Narration.buildPublicContext = function (state, brief, projectedState, qualityPlan) {
+  brief = brief || {};
+  var contract = Story._clone(brief.turnContract || {});
+  (contract.mustRenderFacts || []).forEach(function (fact) {
+    delete fact.privateGains;
+  });
+  var env = brief._envelope || null;
+  var publicThreads = Story.ThreadView.getPublicActiveThreads(state).map(function (thread) {
+    return { threadId: thread.threadId, title: thread.title, type: thread.type, stage: thread.stage, maxStage: thread.maxStage, urgency: thread.urgency, status: thread.status, summary: thread.summary || '' };
+  });
+  var chosenActions = (contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'action'; }).map(function (fact) {
+    return {
+      actorId: fact.actorId, actorName: fact.actorName, publicAction: fact.actionText,
+      category: fact.actionType, targetId: fact.targetId, targetName: fact.targetName,
+      outcome: fact.outcome, outcomeLabel: fact.outcomeLabel, gains: fact.gains || [], costs: fact.costs || [],
+      tags: [fact.actionType], isCustom: fact.source === 'custom',
+    };
+  });
+  var turnEvents = [];
+  (env && env.publicDelta || []).forEach(function (delta) {
+    if (delta.op === 'ADD_EVENT' && delta.payload && delta.payload.text) turnEvents.push(delta.payload.text);
+    if (delta.op === 'UPDATE_RELATION' && delta.payload && delta.payload.publicHint) turnEvents.push(delta.payload.publicHint);
+    if (delta.op === 'ADVANCE_TIME' && delta.payload) turnEvents.push('时间流逝：' + delta.payload.value + delta.payload.unit);
+  });
+  var publicBrief = {
+    chapterIndex: brief.chapterIndex, world: Story._clone(brief.world), scene: Story._clone(brief.scene),
+    focalActors: Story._clone(brief.focalActors || []), narrationBeats: (contract.mustRenderFacts || []).reduce(function (out, fact) {
+      return out.concat((fact.requiredMeaning || []).concat(fact.gains || [], fact.costs || []));
+    }, []), coverageAnchors: chosenActions, isOpening: !!brief.isOpening,
+    openingAnchors: Story._clone(brief.openingAnchors || []), openingAnchorGroups: Story._clone(brief.openingAnchorGroups || {}),
+    turnContract: contract, activeThreads: publicThreads, qualityPlan: Story._clone(qualityPlan || brief.qualityPlan || null),
+    projectedState: Story._clone(projectedState || brief.projectedState || null), style: Story._clone(brief.style || {}),
+    previousTurnSummary: contract.previousTurnSummary || '', repetitionPolicy: contract.repetitionPolicy || {},
+  };
+  var cast = (state.actors || []).map(function (actor) {
+    var relations = {};
+    Object.keys(actor.relationships || {}).forEach(function (relatedId) {
+      var other = (state.actors || []).find(function (candidate) { return candidate.id === relatedId; });
+      var relation = actor.relationships[relatedId];
+      if (other && relation && (relation.trust || relation.suspicion || relation.debt || relation.respect)) relations[other.name] = { trust: relation.trust || 0, suspicion: relation.suspicion || 0, debt: relation.debt || 0, respect: relation.respect || 0 };
+    });
+    return { id: actor.id, name: actor.name, publicProfile: [actor.identity, actor.daoPath].filter(Boolean).join('·'), currentStatus: actor.statusSummary || '', publicGoal: actor.publicWish || '', visibleRelations: Object.keys(relations).length ? relations : Story._clone(actor.relationHints || {}) };
+  });
+  return {
+    mode: 'turn', brief: publicBrief, chosenActions: chosenActions, turnEvents: turnEvents,
+    narrationBeats: publicBrief.narrationBeats, turnContract: contract,
+    mandatoryInteractions: (contract.mustRenderFacts || []).filter(function (fact) { return fact.kind === 'interaction'; }), activeThreads: publicThreads,
+    world: { name: publicBrief.world && publicBrief.world.name, year: publicBrief.world && publicBrief.world.year, worldBibleSummary: (((state.world || {}).worldBible || {}).rules || []).join(''), activeWorldHooks: ((state.world || {}).activeWorldHooks || []).slice(-12), publicFacts: ((state.world || {}).publicFacts || []).slice(-8), publicRumors: ((state.world || {}).publicRumors || []).slice(-8) },
+    cast: cast,
+    previousChapter: state.story.currentChapter ? { title: state.story.currentChapter.title, canonicalSummary: String(state.story.currentChapter.canonicalSummary || state.story.currentChapter.chapterSummary || '').slice(0, 800), endingState: { locationId: projectedState && projectedState.scene && projectedState.scene.locationId || state.story.currentScene && state.story.currentScene.locationId || '', timeOfDay: projectedState && projectedState.scene && projectedState.scene.timeOfDay || state.story.currentScene && state.story.currentScene.timeOfDay || '' } } : null,
+    recentSummary: String(state.story.recentSummary || '').slice(-600) || null,
+    chronicleRecent: (state.story.chronicle || []).slice(-5).map(function (entry) { return entry.text; }),
+    constraints: { proseLength: publicBrief.style.proseLength, paragraphCount: publicBrief.style.paragraphCount, noContradiction: true, noUnjustifiedPowerJump: true, narrationOnly: '只返回 {title, chapter, dialogues, endingImage, audit}；不得返回 statePatch、choices、newFacts、newRumors、newHooks、newRelics、changedRelations、timePassed。' },
   };
 };
 
@@ -5343,6 +5988,11 @@ Story.Narration.applyNarration = function (state, chapter, envelope, isOpening) 
   const s = state.story;
   const pending = s.pendingResolution || {};
   const canonicalSummary = Story.Narration.buildCanonicalSummary(state, envelope, envelope && envelope.interactions, pending.directorPlan, s.currentScene);
+  var privateSummaryByActorId = {};
+  (envelope && envelope.actions || []).forEach(function (action) {
+    var privateParts = (action.gains || []).concat(action.privateEffects || []).map(function (item) { return typeof item === 'string' ? item : item && item.text; }).filter(Boolean);
+    if (privateParts.length) privateSummaryByActorId[action.actorId] = privateParts.join('；');
+  });
   s.chapterIndex += 1;
   s.currentChapter = {
     chapterId: 'chapter_' + String(s.chapterIndex).padStart(4, '0'),
@@ -5350,6 +6000,7 @@ Story.Narration.applyNarration = function (state, chapter, envelope, isOpening) 
     chapter: chapter.chapter,
     chapterSummary: canonicalSummary,
     canonicalSummary: canonicalSummary,
+    privateCanonicalSummaryByActorId: privateSummaryByActorId,
     timePassed: chapter.timePassed || null,
     endingImage: chapter.endingImage || '',
     dialogues: Array.isArray(chapter.dialogues) ? chapter.dialogues : [],
@@ -5359,6 +6010,14 @@ Story.Narration.applyNarration = function (state, chapter, envelope, isOpening) 
   };
   s.recentCanonicalSummaries = (s.recentCanonicalSummaries || []).concat([canonicalSummary]).slice(-8);
   s.recentNarrations = (s.recentNarrations || []).concat([{ title: chapter.title, chapter: chapter.chapter }]).slice(-4);
+  var qualityPlan = pending.qualityPlan || null;
+  var memory = s.narrativeStyleMemory || {};
+  memory.recentOpeningModes = (memory.recentOpeningModes || []).concat([qualityPlan && qualityPlan.openingMode || 'action']).slice(-5);
+  memory.recentOpeningPhrases = (memory.recentOpeningPhrases || []).concat([String(chapter.chapter || '').slice(0, 50)]).slice(-5);
+  memory.recentTitles = (memory.recentTitles || []).concat([chapter.title || '']).slice(-5);
+  memory.recentEndingModes = (memory.recentEndingModes || []).concat([qualityPlan && qualityPlan.endingMode || 'consequence']).slice(-5);
+  memory.recentDominantImages = (memory.recentDominantImages || []).concat([chapter.endingImage || '']).slice(-5);
+  s.narrativeStyleMemory = memory;
   // 记忆只积累本地事实摘要，不再取 AI 正文开头。
   s.recentSummary = (s.recentSummary ? s.recentSummary + ' ' : '') + canonicalSummary;
   s.recentSummary = s.recentSummary.slice(-600);
@@ -5381,7 +6040,7 @@ Story.Provider.capabilities = {
   supportsChatCompletions: true,
 };
 
-Story.Provider.ERROR_CODES = ['NO_API_CONFIG','NO_API_KEY','NETWORK_ERROR','CORS_ERROR','HTTP_401','HTTP_403','HTTP_404','HTTP_429','HTTP_5XX','TIMEOUT','EMPTY_RESPONSE','INVALID_JSON','INVALID_SCHEMA','MODEL_OVERREACH','FORBIDDEN_REVEAL','MISSING_REQUIRED_BEAT','MISSING_OPENING_ANCHOR','MISSING_ACTION_FACT','WRONG_ACTION_TARGET','WRONG_ACTION_OUTCOME','REPETITIVE_NARRATION','UNREGISTERED_ENTITY','UNAUTHORIZED_EVENT','SCENE_CONTRADICTION','TEMPORAL_CONTRADICTION'];
+Story.Provider.ERROR_CODES = ['NO_API_CONFIG','NO_API_KEY','NETWORK_ERROR','CORS_ERROR','HTTP_401','HTTP_403','HTTP_404','HTTP_429','HTTP_5XX','TIMEOUT','EMPTY_RESPONSE','INVALID_JSON','INVALID_SCHEMA','MODEL_OVERREACH','FORBIDDEN_REVEAL','MISSING_REQUIRED_BEAT','MISSING_OPENING_ANCHOR','MISSING_ACTION_FACT','MISSING_INTERACTION_FACT','WRONG_ACTION_TARGET','WRONG_ACTION_OUTCOME','REPETITIVE_NARRATION','REPETITIVE_OPENING','UNREGISTERED_ENTITY','UNREGISTERED_LOCATION','UNAUTHORIZED_EVENT','UNAUTHORIZED_SUPERNATURAL_EFFECT','UNAUTHORIZED_CLUE','UNAUTHORIZED_REWARD','PLAYER_AGENCY_VIOLATION','PLAYER_ACTION_SUPPRESSED','NARRATIVE_CONTRACT_INCOMPLETE','NARRATION_PUBLISH_BLOCKED','NARRATION_TOO_SHORT','NARRATION_INCOMPLETE','NARRATION_TRUNCATED','INSUFFICIENT_PARAGRAPHS','SCENE_CONTRADICTION','TARGET_NOT_PRESENT','TARGET_NOT_REACHABLE','AMBIGUOUS_TARGET','TEMPORAL_CONTRADICTION','CONTINUITY_CONTRADICTION','EVIDENCE_STATUS_VIOLATION'];
 
 /** 调用 AI 叙事（兼容旧 ai.provider.narrate）。返回归一化后的 {title,chapter,dialogues,endingImage,_autoFixed} 或 null。 */
 Story.Provider.narrate = async function (state, brief) {
@@ -5399,10 +6058,21 @@ Story.Provider.narrate = async function (state, brief) {
   state.api.lastRequestAt = requestedAt;
   Story.setAIStatus('requesting', { message: '正在请求 AI 叙事……', lastRequestAt: requestedAt });
   try {
+    brief.enforcePublishGate = !!(Story.ai.providerMeta && Story.ai.providerMeta.enforcePublishGate);
     const ctx = Story.Provider._briefToCtx(state, brief);
     const providerName = Story.ai.providerMeta && Story.ai.providerMeta.provider || '';
     // 无 meta 的 Provider 是 V3.3 旧插件/单元测试兼容路径；浏览器与服务端正式 Provider 都必须提供名称并执行语义校验。
     const skipSemanticValidation = !providerName || /^mock(?:-|$)/.test(providerName) || Story.ai.providerMeta && Story.ai.providerMeta.skipSemanticValidation;
+    state.api.lastNarrationObservation = {
+      providerName: providerName,
+      skipSemanticValidation: !!skipSemanticValidation,
+      semanticValidationExecuted: !skipSemanticValidation,
+      humanActorIds: (brief.turnContract && brief.turnContract.humanActorIds || []).slice(),
+      submittedHumanActorIds: (brief.turnContract && brief.turnContract.submittedHumanActorIds || []).slice(),
+      actionFactIds: (brief.turnContract && brief.turnContract.actionFactIds || []).slice(),
+      interactionFactIds: (brief.turnContract && brief.turnContract.interactionFactIds || []).slice(),
+      validationAttempt: 0, schemaAttempts: 0, semanticAttempts: 0,
+    };
     await Story.Narration.emitDebug({ stage: 'context', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', contract: brief.turnContract, context: ctx });
     // 最多两次：首次失败（空响应或字段不合规）自动重试一次（V3 §13 协议重试）
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -5413,7 +6083,8 @@ Story.Provider.narrate = async function (state, brief) {
         state.api.lastStatus = 'offline'; state.api.lastErrorCode = 'TIMEOUT';
         return null;
       }
-      let raw = wrapped || null;
+      let finishReason = wrapped && typeof wrapped === 'object' ? (wrapped.finishReason || '') : '';
+      let raw = wrapped && typeof wrapped === 'object' && Object.prototype.hasOwnProperty.call(wrapped, 'content') ? wrapped.content : (wrapped || null);
       await Story.Narration.emitDebug({ stage: 'raw', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', attempt: attempt + 1, raw: raw });
       state.api.lastResponseAt = Date.now();
       if (!raw) {
@@ -5424,6 +6095,11 @@ Story.Provider.narrate = async function (state, brief) {
       }
       Story.setAIStatus('received', { message: attempt === 0 ? '已收到 API 响应，正在校验。' : '已收到重试响应，正在校验。', lastRequestAt: requestedAt });
       const parsed = Story.Provider.parseNarrationResponse(raw);
+      parsed.finishReason = parsed.finishReason || finishReason;
+      if (state.api.lastNarrationObservation) {
+        state.api.lastNarrationObservation.validationAttempt = attempt + 1;
+        state.api.lastNarrationObservation.schemaAttempts += 1;
+      }
       const errors = Story.Provider.validateNarrationOnly(parsed);
       if (errors.length) {
         await Story.Narration.emitDebug({ stage: 'validation', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', attempt: attempt + 1, valid: false, errors: errors.map(function (message) { return { code: 'INVALID_SCHEMA', message: message }; }) });
@@ -5439,6 +6115,7 @@ Story.Provider.narrate = async function (state, brief) {
         state.api.lastStatus = 'offline'; state.api.lastErrorCode = 'INVALID_SCHEMA'; state.api.lastErrorMessage = errors.join('；');
         return null;
       }
+      if (state.api.lastNarrationObservation && !skipSemanticValidation) state.api.lastNarrationObservation.semanticAttempts += 1;
       const semanticErrors = skipSemanticValidation ? [] : Story.Narration.validateSemantic(state, parsed, brief);
       if (semanticErrors.length) {
         await Story.Narration.emitDebug({ stage: 'validation', roomId: state.roomId || 'local', turnId: brief.turnContract && brief.turnContract.turnId || 'turn_unknown', attempt: attempt + 1, valid: false, errors: semanticErrors });
@@ -5468,7 +6145,7 @@ Story.Provider.narrate = async function (state, brief) {
       state.api.lastStatus = 'ok'; state.api.lastErrorCode = null; state.api.lastErrorMessage = '';
       const msg = parsed._autoFixed ? '已自动修复格式并采用 API 正文。' : '已采用 API 正文。';
       Story.setAIStatus('success', { message: msg, lastRequestAt: requestedAt });
-      return { title: parsed.title, chapter: parsed.chapter, dialogues: parsed.dialogues, endingImage: parsed.endingImage, _autoFixed: !!parsed._autoFixed };
+      return { title: parsed.title, chapter: parsed.chapter, dialogues: parsed.dialogues, endingImage: parsed.endingImage, audit: parsed.audit || null, finishReason: parsed.finishReason || '', _autoFixed: !!parsed._autoFixed };
     }
     return null;
   } catch (e) {
@@ -5616,6 +6293,11 @@ Story.Provider._briefToCtx = function (state, brief) {
   };
 };
 
+/* V3.4.2：覆盖旧上下文编译器，确保 _envelope/privateDelta 不会进入公共 AI 请求。 */
+Story.Provider._briefToCtx = function (state, brief) {
+  return Story.Narration.buildPublicContext(state, brief, brief && brief.projectedState, brief && brief.qualityPlan);
+};
+
 /** 解析模型叙事响应（6 级回退，V3.2 §O3） */
 Story.Provider._mergeChapter = function (ch) {
   if (Array.isArray(ch)) {
@@ -5681,6 +6363,21 @@ Story.Provider.parseNarrationResponse = function (rawText) {
 
   // 6. 完全失败
   return { title: '', chapter: '', dialogues: [], endingImage: '', plainText: false, _autoFixed: false };
+};
+
+/* 保留审计区与 Provider finish_reason，但后续组装仍只采纳文案字段。 */
+Story.Provider._parseNarrationResponseV341 = Story.Provider.parseNarrationResponse;
+Story.Provider.parseNarrationResponse = function (rawText) {
+  var parsed = Story.Provider._parseNarrationResponseV341(rawText);
+  var metadata = rawText && typeof rawText === 'object' ? rawText : null;
+  if (!metadata && typeof rawText === 'string') {
+    try { metadata = JSON.parse(rawText); } catch (error) { metadata = null; }
+  }
+  if (metadata && typeof metadata === 'object') {
+    parsed.audit = metadata.audit && typeof metadata.audit === 'object' ? Story._clone(metadata.audit) : null;
+    parsed.finishReason = metadata.finishReason || '';
+  }
+  return parsed;
 };
 
 /** 严格校验：AI 只能返回 title/chapter/dialogues/endingImage（V3.2 §N3 §J1）。

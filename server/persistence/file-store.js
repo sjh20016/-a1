@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 function cloneForDisk(room) {
   var serialized = JSON.stringify(room, function (key, value) {
@@ -28,7 +29,7 @@ class FileStore {
   async saveRoom(room) {
     if (!room || !room.roomId) throw new Error('无法保存空房间');
     var file = this.fileFor(room.roomId);
-    var tmp = file + '.' + process.pid + '.tmp';
+    var tmp = file + '.' + process.pid + '.' + crypto.randomUUID() + '.tmp';
     var payload = JSON.stringify({ saveVersion: room.schemaVersion, snapshotAt: Date.now(), room: cloneForDisk(room) }, null, 2);
     await fs.promises.writeFile(tmp, payload, 'utf8');
     await fs.promises.rename(tmp, file);
