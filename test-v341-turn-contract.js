@@ -21,7 +21,7 @@ async function main() {
     interactions: [{ interactionId: 'i', type: 'attack_sleeping_actor', actorIds: ['bot', 'a'], targetId: 'a', requiredNarrativeFacts: ['守护者攻击飞猪', '飞猪的休息被打断'] }],
   };
   const contract = Story.Narration.buildTurnContract(state, envelope, { result: 'bend' }, scene);
-  ok('契约版本与 turnId 正确', contract.contractVersion === '1.0' && contract.turnId === 'turn_0001');
+  ok('契约版本与 turnId 正确', contract.contractVersion === '1.2' && contract.turnId === 'turn_0001');
   ok('每个真人行动各有事实', contract.mustRenderFacts.filter(function (f) { return f.kind === 'action'; }).length === 2);
   ok('Bot 单人行动不占真人行动事实', !contract.mustRenderFacts.some(function (f) { return f.kind === 'action' && f.actorId === 'bot'; }));
   ok('交互另生成一项事实', contract.mustRenderFacts.some(function (f) { return f.kind === 'interaction' && f.interactionType === 'attack_sleeping_actor'; }));

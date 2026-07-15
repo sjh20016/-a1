@@ -46,10 +46,10 @@ async function startTestServer(options) {
   var dataDir = options.dataDir || fs.mkdtempSync(path.join(os.tmpdir(), 'xiuxingju-server-'));
   var control = options.control || { fail: false };
   var app = createServer({
-    config: {
+    config: Object.assign({
       host: '127.0.0.1', port: 0, publicOrigin: '', roomSaveDir: path.join(dataDir, 'rooms'),
       aiEnabled: true, aiBaseUrl: 'http://mock.invalid', aiApiKey: 'test-only', aiModel: 'mock', aiTimeoutMs: 1000,
-    },
+    }, options.config || {}),
     aiProvider: createNarrationProvider(control),
     logger: { info: function () {}, warn: function () {}, error: function () {} },
   });
