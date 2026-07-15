@@ -18,5 +18,5 @@ jobs:
       - run: npm ci
       - run: npm run check:syntax
       - run: npm test
-      - run: npm run simulate -- --seed CI-V342 --turns 30 --quiet
+      - run: npm run simulate -- --seed CI-V342 --seeds 20 --turns 30 --quiet
       - run: npm audit --omit=dev

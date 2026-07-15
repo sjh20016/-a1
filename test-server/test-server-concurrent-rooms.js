@@ -7,17 +7,30 @@ function ok(name, condition, detail) { if (condition) { pass++; console.log('✓
 async function main() {
   let active = 0;
   let maxActive = 0;
-  const order = [];
-  function task(roomId, delay) {
-    return Room.storyExecutionQueue.run(async function () {
-      active++; maxActive = Math.max(maxActive, active); order.push(roomId + ':start');
+  function delayed(engine, delay) {
+    return engine.run(async function () {
+      active++; maxActive = Math.max(maxActive, active);
       await new Promise(function (resolve) { setTimeout(resolve, delay); });
-      order.push(roomId + ':end'); active--;
+      active--;
     });
   }
-  await Promise.all([task('room_a', 30), task('room_b', 5), task('room_c', 1)]);
-  ok('不同房间不会并发进入全局 Story', maxActive === 1, String(maxActive));
-  ok('全局队列保持提交顺序', order.join(',') === 'room_a:start,room_a:end,room_b:start,room_b:end,room_c:start,room_c:end', order.join(','));
+  const rooms = Array.from({ length: 10 }, function (_, index) {
+    return Room.createRoomState({ roomId: 'room_parallel_' + index });
+  });
+  const startedAt = Date.now();
+  await Promise.all(rooms.map(function (room) { return delayed(Room.getStoryEngine(room), 50); }));
+  const elapsed = Date.now() - startedAt;
+  ok('不同房间拥有不同 StoryEngine', new Set(rooms.map(function (room) { return Room.getStoryEngine(room); })).size === 10);
+  ok('不同房间 Provider 等待可并行', maxActive === 10, String(maxActive));
+  ok('10 房间耗时接近一次等待', elapsed < 180, String(elapsed) + 'ms');
+
+  active = 0; maxActive = 0;
+  const oneEngine = Room.getStoryEngine(rooms[0]);
+  const serialStartedAt = Date.now();
+  await Promise.all([delayed(oneEngine, 35), delayed(oneEngine, 35), delayed(oneEngine, 35)]);
+  const serialElapsed = Date.now() - serialStartedAt;
+  ok('同一房间仍严格串行', maxActive === 1, String(maxActive));
+  ok('同房间三项等待按队列累计', serialElapsed >= 90, String(serialElapsed) + 'ms');
   console.log('\nserver concurrent rooms: ' + pass + ' passed / ' + fail + ' failed'); if (fail) process.exitCode = 1;
 }
 main().catch(function (error) { console.error(error); process.exitCode = 1; });

@@ -24,6 +24,7 @@ function snapshotDirector(state) {
     hasActiveArc: !!d.activeArc,
     activeArcStatus: d.activeArc ? d.activeArc.status : null,
     currentBeatIndex: d.activeArc ? d.activeArc.currentBeatIndex : -1,
+    currentBeatProgress: d.activeArc && d.activeArc.beats[d.activeArc.currentBeatIndex] ? (d.activeArc.beats[d.activeArc.currentBeatIndex].progress || 0) : 0,
     clockCurrents: d.activeArc ? (d.activeArc.pressureClocks || []).map(function (c) { return c.current; }) : [],
     dormantCount: d.dormantArcs.length,
     divergenceLogLen: d.activeArc ? (d.activeArc.divergenceLog || []).length : 0,
@@ -105,8 +106,8 @@ async function main() {
   await Story.resolveTurn(state2, { lu: { choiceId: invChoice.id } });
 
   var snapAfter2 = snapshotDirector(state2);
-  ok('AI 成功后 currentBeatIndex 已变化', snapAfter2.currentBeatIndex !== snapBefore2.currentBeatIndex,
-    'before=' + snapBefore2.currentBeatIndex + ' after=' + snapAfter2.currentBeatIndex);
+  ok('AI 成功后 Director 节拍进度已提交', snapAfter2.currentBeatIndex !== snapBefore2.currentBeatIndex || snapAfter2.currentBeatProgress > snapBefore2.currentBeatProgress,
+    'beat=' + snapBefore2.currentBeatIndex + '→' + snapAfter2.currentBeatIndex + ' progress=' + snapBefore2.currentBeatProgress + '→' + snapAfter2.currentBeatProgress);
   ok('AI 成功后 divergenceLog +1', snapAfter2.divergenceLogLen === snapBefore2.divergenceLogLen + 1,
     'before=' + snapBefore2.divergenceLogLen + ' after=' + snapAfter2.divergenceLogLen);
   ok('AI 成功后 lastDirectorEvent.result = advance',

@@ -21,6 +21,7 @@ const STATIC_ROUTES = {
   '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/index.html': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/story-core.js': { file: 'story-core.js', type: 'text/javascript; charset=utf-8' },
+  '/src/application/story-engine.js': { file: 'src/application/story-engine.js', type: 'text/javascript; charset=utf-8' },
   '/room-core.js': { file: 'room-core.js', type: 'text/javascript; charset=utf-8' },
   '/public/online-client.js': { file: 'public/online-client.js', type: 'text/javascript; charset=utf-8' },
 };
