@@ -1,0 +1,17 @@
+{
+  "name": "xiuxianju-v3",
+  "version": "3.4.4",
+  "description": "多人修仙叙事游戏：本地确定性裁决、AI 文案渲染与发布闸门（V3.4.2）",
+  "private": true,
+  "scripts": {
+    "start": "node server/index.js",
+    "server": "node server/index.js",
+    "smoke:cloud": "node scripts/cloud-smoke.mjs",
+    "simulate": "node scripts/simulate-baseline.js",
+    "check:syntax": "node --check story-core.js && node --check src/application/story-engine.js && node --check room-core.js && node --check public/online-client.js && node --check server/index.js && node --check server/room-runtime.js && node --check server/ai-provider.js"
+  },
+  "dependencies": {
+    "jsdom": "^25.0.1",
+    "ws": "^8.21.0"
+  }
+}

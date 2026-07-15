@@ -39,7 +39,7 @@ async function main() {
   state.settings.narrativeProfile = 'immersive';
   const immersive = Story.Narration.buildQualityPlan(state, contract, projected);
 
-  ok('文案档位采用版本化标识', immersive.proseProfile.id === 'immersive-v1' && immersive.qualityPlanVersion === '1.1');
+  ok('文案档位采用版本化标识', immersive.proseProfile.id === 'immersive-v1' && immersive.qualityPlanVersion === '1.2');
   ok('沉浸档理想篇幅高于均衡与凝练', immersive.targetLength.idealChars > balanced.targetLength.idealChars && balanced.targetLength.idealChars > concise.targetLength.idealChars);
   ok('沉浸档规划更多段落', immersive.desiredParagraphCount > concise.desiredParagraphCount);
   ok('动态发布底线低于目标但高于旧三人底线', immersive.targetLength.publishFloorChars >= 600 && immersive.targetLength.publishFloorChars < immersive.targetLength.minChars);

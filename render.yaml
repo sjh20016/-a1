@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: xiuxingju-demo
+    runtime: node
+    plan: starter
+    branch: v344-cloud-demo
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 30
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /var/data
+      - key: ROOM_SAVE_DIR
+        value: /var/data/rooms
+      - key: AI_ENABLED
+        value: "true"
+      - key: AI_BASE_URL
+        sync: false
+      - key: AI_API_KEY
+        sync: false
+      - key: AI_MODEL
+        sync: false
+      - key: SERVER_SECRET
+        generateValue: true
+      - key: BETA_ACCESS_CODE
+        sync: false
+      - key: NARRATION_DEBUG
+        value: "false"
+      - key: MAX_ROUNDS
+        value: "12"
+      - key: ROOM_TTL_MINUTES
+        value: "180"
+      - key: ROOM_IDLE_MINUTES
+        value: "30"
+      - key: AI_GLOBAL_CONCURRENCY
+        value: "3"
+      - key: AI_ROOM_CONCURRENCY
+        value: "1"
+      - key: AI_DAILY_BUDGET
+        value: "200"
+    disk:
+      name: xiuxingju-data
+      mountPath: /var/data
+      sizeGB: 1
